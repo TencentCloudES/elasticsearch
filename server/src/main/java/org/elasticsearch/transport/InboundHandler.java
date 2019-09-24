@@ -32,6 +32,8 @@ import org.elasticsearch.common.util.Maps;
 import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.indices.breaker.CircuitBreakerService;
+import org.elasticsearch.search.SearchPhaseResult;
+import org.elasticsearch.search.SearchService;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import java.io.IOException;
@@ -134,7 +136,7 @@ public class InboundHandler {
                     if (message.isError()) {
                         handlerResponseError(message.getStreamInput(), handler);
                     } else {
-                        handleResponse(remoteAddress, message.getStreamInput(), handler);
+                        handleResponse(remoteAddress, message.getStreamInput(), handler, reference.length());
                     }
                     // Check the entire message has been read
                     final int nextByte = message.getStreamInput().read();
@@ -198,20 +200,37 @@ public class InboundHandler {
     }
 
     private <T extends TransportResponse> void handleResponse(InetSocketAddress remoteAddress, final StreamInput stream,
-                                                              final TransportResponseHandler<T> handler) {
+                                                              final TransportResponseHandler<T> handler, int messageLengthBytes) {
         final T response;
+        long reservedBytes = 0;
+        CircuitBreaker breaker = circuitBreakerService.getBreaker(CircuitBreaker.REQUEST);
         try {
+            if (handler.toString().contains("SearchTransportService$ConnectionCountingHandler")) {
+                reservedBytes = messageLengthBytes * SearchService.getExpansionRatio();
+                breaker.addEstimateBytesAndMaybeBreak(reservedBytes, "<transport_response>");
+            }
+
             response = handler.read(stream);
+            if (response instanceof SearchPhaseResult) {
+                ((SearchPhaseResult) response).setResultMemSize(reservedBytes);
+            }
             response.remoteAddress(new TransportAddress(remoteAddress));
         } catch (Exception e) {
             handleException(handler, new TransportSerializationException(
                 "Failed to deserialize response from handler [" + handler.getClass().getName() + "]", e));
+            if (reservedBytes > 0) {
+                breaker.addWithoutBreaking(-reservedBytes);
+            }
             return;
         }
+        final long needReleaseBytes = reservedBytes;
         threadPool.executor(handler.executor()).execute(new AbstractRunnable() {
             @Override
             public void onFailure(Exception e) {
                 handleException(handler, new ResponseHandlerFailureTransportException(e));
+                if (needReleaseBytes > 0) {
+                    breaker.addWithoutBreaking(-needReleaseBytes);
+                }
             }
 
             @Override
