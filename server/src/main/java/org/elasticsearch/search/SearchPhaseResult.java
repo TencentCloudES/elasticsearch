@@ -40,6 +40,7 @@ public abstract class SearchPhaseResult extends TransportResponse {
     private SearchShardTarget searchShardTarget;
     private int shardIndex = -1;
     protected long requestId;
+    private long resultMemSize;
 
     protected SearchPhaseResult() {
 
@@ -47,6 +48,14 @@ public abstract class SearchPhaseResult extends TransportResponse {
 
     protected SearchPhaseResult(StreamInput in) throws IOException {
         super(in);
+    }
+
+    public void setResultMemSize(long resultMemSize) {
+        this.resultMemSize = resultMemSize;
+    }
+
+    public long getResultMemSize() {
+        return resultMemSize;
     }
 
     /**
