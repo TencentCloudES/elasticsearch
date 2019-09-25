@@ -37,6 +37,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 
 /**
@@ -408,6 +409,7 @@ abstract class InitialSearchPhase<FirstResult extends SearchPhaseResult> extends
      */
     static class ArraySearchPhaseResults<Result extends SearchPhaseResult> extends SearchPhaseResults<Result> {
         final AtomicArray<Result> results;
+        final AtomicLong resultsBytes = new AtomicLong(0);
 
         ArraySearchPhaseResults(int size) {
             super(size);
@@ -421,6 +423,8 @@ abstract class InitialSearchPhase<FirstResult extends SearchPhaseResult> extends
         void consumeResult(Result result) {
             assert results.get(result.getShardIndex()) == null : "shardIndex: " + result.getShardIndex() + " is already set";
             results.set(result.getShardIndex(), result);
+            final long totalResultsBytes = resultsBytes.addAndGet(result.getResultMemSize());
+
         }
 
         boolean hasResult(int shardIndex) {
