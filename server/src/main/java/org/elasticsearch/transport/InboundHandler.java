@@ -206,7 +206,7 @@ public class InboundHandler {
         CircuitBreaker breaker = circuitBreakerService.getBreaker(CircuitBreaker.REQUEST);
         try {
             if (handler.toString().contains("SearchTransportService$ConnectionCountingHandler")) {
-                reservedBytes = messageLengthBytes * SearchService.getExpansionRatio();
+                reservedBytes = messageLengthBytes * SearchService.getBucketDeserializeExpansionRatio();
                 breaker.addEstimateBytesAndMaybeBreak(reservedBytes, "<transport_response>");
             }
 

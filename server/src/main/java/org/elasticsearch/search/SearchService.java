@@ -149,9 +149,10 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
     public static final Setting<Integer> MAX_OPEN_SCROLL_CONTEXT =
         Setting.intSetting("search.max_open_scroll_context", 500, 0, Property.Dynamic, Property.NodeScope);
 
-    public static final int DEFAULT_SEARCH_BUCKET_EXPANSION_RATIO = 10;
-    public static final Setting<Integer> SEARCH_BUCKET_EXPANSION_RATIO_SETTING =
-        Setting.intSetting("search.bucket_expansion_ratio", DEFAULT_SEARCH_BUCKET_EXPANSION_RATIO, 1, Setting.Property.NodeScope, Setting.Property.Dynamic);
+    public static final int DEFAULT_BUCKET_DESERIALIZE_EXPANSION_RATIO = 10;
+    public static final Setting<Integer> BUCKET_DESERIALIZE_EXPANSION_RATIO_SETTING =
+        Setting.intSetting("search.bucket_deserialize_expansion_ratio", DEFAULT_BUCKET_DESERIALIZE_EXPANSION_RATIO,
+            1, Setting.Property.NodeScope, Setting.Property.Dynamic);
 
     public static final int DEFAULT_SIZE = 10;
     public static final int DEFAULT_FROM = 0;
@@ -196,7 +197,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
 
     private final AtomicInteger openScrollContexts = new AtomicInteger();
 
-    private static int expansionRatio;
+    private static int bucketDeserializeExpansionRatio;
 
     public SearchService(ClusterService clusterService, IndicesService indicesService,
                          ThreadPool threadPool, ScriptService scriptService, BigArrays bigArrays, FetchPhase fetchPhase,
@@ -212,7 +213,7 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         this.fetchPhase = fetchPhase;
         this.multiBucketConsumerService = new MultiBucketConsumerService(clusterService, settings);
 
-        expansionRatio = SEARCH_BUCKET_EXPANSION_RATIO_SETTING.get(settings);
+        bucketDeserializeExpansionRatio = BUCKET_DESERIALIZE_EXPANSION_RATIO_SETTING.get(settings);
 
         TimeValue keepAliveInterval = KEEPALIVE_INTERVAL_SETTING.get(settings);
         setKeepAlives(DEFAULT_KEEPALIVE_SETTING.get(settings), MAX_KEEPALIVE_SETTING.get(settings));
@@ -235,8 +236,8 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         lowLevelCancellation = LOW_LEVEL_CANCELLATION_SETTING.get(settings);
         clusterService.getClusterSettings().addSettingsUpdateConsumer(LOW_LEVEL_CANCELLATION_SETTING, this::setLowLevelCancellation);
 
-        clusterService.getClusterSettings().addSettingsUpdateConsumer(SEARCH_BUCKET_EXPANSION_RATIO_SETTING, value -> {
-            expansionRatio = value;
+        clusterService.getClusterSettings().addSettingsUpdateConsumer(BUCKET_DESERIALIZE_EXPANSION_RATIO_SETTING, value -> {
+            bucketDeserializeExpansionRatio = value;
         });
     }
 
@@ -274,8 +275,8 @@ public class SearchService extends AbstractLifecycleComponent implements IndexEv
         this.lowLevelCancellation = lowLevelCancellation;
     }
 
-    public static int getExpansionRatio() {
-        return expansionRatio;
+    public static int getBucketDeserializeExpansionRatio() {
+        return bucketDeserializeExpansionRatio;
     }
 
     @Override
