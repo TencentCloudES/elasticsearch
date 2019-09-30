@@ -23,6 +23,10 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.elasticsearch.Version;
+import org.elasticsearch.action.ActionListener;
+import org.elasticsearch.action.search.InitialSearchActionListener;
+import org.elasticsearch.action.search.SearchExecutionStatsCollector;
+import org.elasticsearch.action.search.SearchTransportService;
 import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
@@ -205,9 +209,22 @@ public class InboundHandler {
         long reservedBytes = 0;
         CircuitBreaker breaker = circuitBreakerService.getBreaker(CircuitBreaker.REQUEST);
         try {
-            if (handler.toString().contains("SearchTransportService$ConnectionCountingHandler")) {
-                reservedBytes = messageLengthBytes * SearchService.getBucketDeserializeExpansionRatio();
-                breaker.addEstimateBytesAndMaybeBreak(reservedBytes, "<transport_response>");
+            // estimate aggregation response memory and check circuit breaker
+            if (handler instanceof TransportService.ContextRestoreResponseHandler) {
+                TransportResponseHandler<T> delegate = ((TransportService.ContextRestoreResponseHandler<T>) handler).getDelegate();
+                if (delegate instanceof SearchTransportService.ConnectionCountingHandler) {
+                    ActionListener actionListener = ((SearchTransportService.ConnectionCountingHandler<T>) delegate).getListener();
+                    if (actionListener instanceof SearchExecutionStatsCollector) {
+                        ActionListener initSearchActionListener = ((SearchExecutionStatsCollector) actionListener).getListener();
+                        if (initSearchActionListener instanceof InitialSearchActionListener) {
+                            if (((InitialSearchActionListener) initSearchActionListener).getSearchRequest()
+                                .source().aggregations().count() > 0) {
+                                reservedBytes = messageLengthBytes * SearchService.getBucketDeserializeExpansionRatio();
+                                breaker.addEstimateBytesAndMaybeBreak(reservedBytes, "<aggregation_transport_response>");
+                            }
+                        }
+                    }
+                }
             }
 
             response = handler.read(stream);

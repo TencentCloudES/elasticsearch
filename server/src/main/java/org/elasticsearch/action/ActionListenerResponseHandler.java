@@ -49,6 +49,10 @@ public class ActionListenerResponseHandler<Response extends TransportResponse> i
         this(listener, reader, ThreadPool.Names.SAME);
     }
 
+    public ActionListener<? super Response> getListener() {
+        return listener;
+    }
+
     @Override
     public void handleResponse(Response response) {
         listener.onResponse(response);

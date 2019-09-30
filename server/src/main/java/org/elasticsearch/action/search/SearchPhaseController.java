@@ -34,8 +34,10 @@ import org.apache.lucene.search.TopFieldDocs;
 import org.apache.lucene.search.TotalHits;
 import org.apache.lucene.search.TotalHits.Relation;
 import org.apache.lucene.search.grouping.CollapseTopFieldDocs;
+import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.collect.HppcMaps;
 import org.elasticsearch.common.lucene.search.TopDocsAndMaxScore;
+import org.elasticsearch.indices.breaker.CircuitBreakerService;
 import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.SearchHits;
@@ -71,13 +73,15 @@ public final class SearchPhaseController {
     private static final ScoreDoc[] EMPTY_DOCS = new ScoreDoc[0];
 
     private final Function<Boolean, ReduceContext> reduceContextFunction;
+    private final CircuitBreakerService circuitBreakerService;
 
     /**
      * Constructor.
      * @param reduceContextFunction A function that builds a context for the reduce of an {@link InternalAggregation}
      */
-    public SearchPhaseController(Function<Boolean, ReduceContext> reduceContextFunction) {
+    public SearchPhaseController(Function<Boolean, ReduceContext> reduceContextFunction, CircuitBreakerService circuitBreakerService) {
         this.reduceContextFunction = reduceContextFunction;
+        this.circuitBreakerService = circuitBreakerService;
     }
 
     public AggregatedDfs aggregateDfs(Collection<DfsSearchResult> results) {
@@ -470,6 +474,7 @@ public final class SearchPhaseController {
             }
             if (consumeAggs) {
                 aggregationsList.add((InternalAggregations) result.consumeAggs());
+                circuitBreakerService.getBreaker(CircuitBreaker.REQUEST).addWithoutBreaking(-result.getResultMemSize());
             }
             if (hasProfileResults) {
                 String key = result.getSearchShardTarget().toString();
@@ -575,6 +580,7 @@ public final class SearchPhaseController {
         private int numReducePhases = 0;
         private final TopDocsStats topDocsStats;
         private final boolean performFinalReduce;
+        private final CircuitBreakerService circuitBreakerService;
 
         /**
          * Creates a new {@link QueryPhaseResultConsumer}
@@ -584,7 +590,8 @@ public final class SearchPhaseController {
          *                   the buffer is used to incrementally reduce aggregation results before all shards responded.
          */
         private QueryPhaseResultConsumer(SearchPhaseController controller, int expectedResultSize, int bufferSize,
-                                         boolean hasTopDocs, boolean hasAggs, int trackTotalHitsUpTo, boolean performFinalReduce) {
+                                         boolean hasTopDocs, boolean hasAggs, int trackTotalHitsUpTo,
+                                         boolean performFinalReduce, CircuitBreakerService circuitBreakerService) {
             super(expectedResultSize);
             if (expectedResultSize != 1 && bufferSize < 2) {
                 throw new IllegalArgumentException("buffer size must be >= 2 if there is more than one expected result");
@@ -604,6 +611,7 @@ public final class SearchPhaseController {
             this.bufferSize = bufferSize;
             this.topDocsStats = new TopDocsStats(trackTotalHitsUpTo);
             this.performFinalReduce = performFinalReduce;
+            this.circuitBreakerService = circuitBreakerService;
         }
 
         @Override
@@ -634,6 +642,7 @@ public final class SearchPhaseController {
             final int i = index++;
             if (hasAggs) {
                 aggsBuffer[i] = (InternalAggregations) querySearchResult.consumeAggs();
+                circuitBreakerService.getBreaker(CircuitBreaker.REQUEST).addWithoutBreaking(-querySearchResult.getResultMemSize());
             }
             if (hasTopDocs) {
                 final TopDocsAndMaxScore topDocs = querySearchResult.consumeTopDocs(); // can't be null
@@ -690,7 +699,7 @@ public final class SearchPhaseController {
             if (request.getBatchedReduceSize() < numShards) {
                 // only use this if there are aggs and if there are more shards than we should reduce at once
                 return new QueryPhaseResultConsumer(this, numShards, request.getBatchedReduceSize(), hasTopDocs, hasAggs,
-                    trackTotalHitsUpTo, request.isFinalReduce());
+                    trackTotalHitsUpTo, request.isFinalReduce(), circuitBreakerService);
             }
         }
         return new InitialSearchPhase.ArraySearchPhaseResults<SearchPhaseResult>(numShards) {

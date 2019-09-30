@@ -255,6 +255,7 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
     @Override
     public final void onShardSuccess(Result result) {
         successfulOps.incrementAndGet();
+
         results.consumeResult(result);
         if (logger.isTraceEnabled()) {
             logger.trace("got first-phase result from {}", result != null ? result.getSearchShardTarget() : null);

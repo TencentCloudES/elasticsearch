@@ -53,6 +53,10 @@ public final class SearchExecutionStatsCollector implements ActionListener<Searc
         return (connection, originalListener) -> new SearchExecutionStatsCollector(originalListener, service, connection.getNode().getId());
     }
 
+    public ActionListener<SearchPhaseResult> getListener() {
+        return listener;
+    }
+
     @Override
     public void onResponse(SearchPhaseResult response) {
         QuerySearchResult queryResult = response.queryResult();
