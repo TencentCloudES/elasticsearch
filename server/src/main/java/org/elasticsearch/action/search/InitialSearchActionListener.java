@@ -18,7 +18,6 @@
  */
 package org.elasticsearch.action.search;
 
-import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.search.SearchPhaseResult;
 import org.elasticsearch.search.SearchShardTarget;
 
@@ -26,29 +25,16 @@ import org.elasticsearch.search.SearchShardTarget;
  * An base action listener that ensures shard target and shard index is set on all responses
  * received by this listener.
  */
-abstract class SearchActionListener<T extends SearchPhaseResult> implements ActionListener<T> {
+public abstract class InitialSearchActionListener<T extends SearchPhaseResult> extends SearchActionListener<T> {
+    private final SearchRequest searchRequest;
 
-    private final int requestIndex;
-    private final SearchShardTarget searchShardTarget;
-
-    protected SearchActionListener(SearchShardTarget searchShardTarget,
-                                   int shardIndex) {
-        assert shardIndex >= 0 : "shard index must be positive";
-        this.searchShardTarget = searchShardTarget;
-        this.requestIndex = shardIndex;
+    protected InitialSearchActionListener(SearchShardTarget searchShardTarget,
+                                              int shardIndex, SearchRequest searchRequest) {
+        super(searchShardTarget, shardIndex);
+        this.searchRequest = searchRequest;
     }
 
-    @Override
-    public final void onResponse(T response) {
-        response.setShardIndex(requestIndex);
-        setSearchShardTarget(response);
-        innerOnResponse(response);
+    public SearchRequest getSearchRequest() {
+        return searchRequest;
     }
-
-    protected void setSearchShardTarget(T response) { // some impls need to override this
-        response.setSearchShardTarget(searchShardTarget);
-    }
-
-    protected abstract void innerOnResponse(T response);
-
 }

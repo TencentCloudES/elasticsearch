@@ -37,6 +37,7 @@ import org.elasticsearch.common.text.Text;
 import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.util.concurrent.AtomicArray;
 import org.elasticsearch.index.shard.ShardId;
+import org.elasticsearch.indices.breaker.NoneCircuitBreakerService;
 import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.SearchHits;
@@ -88,7 +89,7 @@ public class SearchPhaseControllerTests extends ESTestCase {
             (finalReduce) -> {
                 reductions.add(finalReduce);
                 return new InternalAggregation.ReduceContext(BigArrays.NON_RECYCLING_INSTANCE, null, finalReduce);
-            });
+            }, new NoneCircuitBreakerService());
     }
 
     public void testSortDocs() {
