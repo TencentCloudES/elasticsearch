@@ -240,13 +240,13 @@ public class InboundHandler {
             }
             return;
         }
-        final long needReleaseBytes = reservedBytes;
+        final long needToReleaseBytes = reservedBytes;
         threadPool.executor(handler.executor()).execute(new AbstractRunnable() {
             @Override
             public void onFailure(Exception e) {
                 handleException(handler, new ResponseHandlerFailureTransportException(e));
-                if (needReleaseBytes > 0) {
-                    breaker.addWithoutBreaking(-needReleaseBytes);
+                if (needToReleaseBytes > 0) {
+                    breaker.addWithoutBreaking(-needToReleaseBytes);
                 }
             }
 

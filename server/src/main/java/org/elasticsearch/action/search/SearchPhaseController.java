@@ -65,6 +65,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.IntFunction;
 
@@ -457,6 +458,7 @@ public final class SearchPhaseController {
             : Collections.emptyMap();
         int from = 0;
         int size = 0;
+        long needToReleaseBytes = 0;
         for (SearchPhaseResult entry : queryResults) {
             QuerySearchResult result = entry.queryResult();
             from = result.from();
@@ -474,7 +476,7 @@ public final class SearchPhaseController {
             }
             if (consumeAggs) {
                 aggregationsList.add((InternalAggregations) result.consumeAggs());
-                circuitBreakerService.getBreaker(CircuitBreaker.REQUEST).addWithoutBreaking(-result.getResultMemSize());
+                needToReleaseBytes += result.getResultMemSize();
             }
             if (hasProfileResults) {
                 String key = result.getSearchShardTarget().toString();
@@ -497,6 +499,8 @@ public final class SearchPhaseController {
         final SortedTopDocs sortedTopDocs = sortDocs(isScrollRequest, queryResults, bufferedTopDocs, topDocsStats, from, size,
             reducedCompletionSuggestions);
         final TotalHits totalHits = topDocsStats.getTotalHits();
+        circuitBreakerService.getBreaker(CircuitBreaker.REQUEST).addWithoutBreaking(-needToReleaseBytes);
+
         return new ReducedQueryPhase(totalHits, topDocsStats.fetchHits, topDocsStats.getMaxScore(),
             topDocsStats.timedOut, topDocsStats.terminatedEarly, reducedSuggest, aggregations, shardResults, sortedTopDocs,
             firstResult.sortValueFormats(), numReducePhases, size, from, false);
@@ -581,6 +585,7 @@ public final class SearchPhaseController {
         private final TopDocsStats topDocsStats;
         private final boolean performFinalReduce;
         private final CircuitBreakerService circuitBreakerService;
+        private final AtomicLong bufferedResultBytes;
 
         /**
          * Creates a new {@link QueryPhaseResultConsumer}
@@ -612,6 +617,7 @@ public final class SearchPhaseController {
             this.topDocsStats = new TopDocsStats(trackTotalHitsUpTo);
             this.performFinalReduce = performFinalReduce;
             this.circuitBreakerService = circuitBreakerService;
+            this.bufferedResultBytes = new AtomicLong(0);
         }
 
         @Override
@@ -628,6 +634,7 @@ public final class SearchPhaseController {
                     InternalAggregations reducedAggs = InternalAggregations.reduce(Arrays.asList(aggsBuffer), reduceContext);
                     Arrays.fill(aggsBuffer, null);
                     aggsBuffer[0] = reducedAggs;
+                    circuitBreakerService.getBreaker(CircuitBreaker.REQUEST).addWithoutBreaking(-bufferedResultBytes.get());
                 }
                 if (hasTopDocs) {
                     TopDocs reducedTopDocs = mergeTopDocs(Arrays.asList(topDocsBuffer),
@@ -642,7 +649,7 @@ public final class SearchPhaseController {
             final int i = index++;
             if (hasAggs) {
                 aggsBuffer[i] = (InternalAggregations) querySearchResult.consumeAggs();
-                circuitBreakerService.getBreaker(CircuitBreaker.REQUEST).addWithoutBreaking(-querySearchResult.getResultMemSize());
+                bufferedResultBytes.addAndGet(querySearchResult.getResultMemSize());
             }
             if (hasTopDocs) {
                 final TopDocsAndMaxScore topDocs = querySearchResult.consumeTopDocs(); // can't be null
