@@ -326,7 +326,8 @@ public class CircuitBreakerServiceIT extends ESIntegTestCase {
             .put(EnableAllocationDecider.INDEX_ROUTING_REBALANCE_ENABLE_SETTING.getKey(), EnableAllocationDecider.Rebalance.NONE))
             .addMapping("type", "test", "type=text,fielddata=true"));
 
-        // Set request breaker limited size to bigger than data node request memory consumption and less than coordinate node total response size
+        // Make request breaker limited to bigger than data node request memory consumption
+        // and less than coordinate node total response size
         Settings resetSettings = Settings.builder()
             .put(HierarchyCircuitBreakerService.REQUEST_CIRCUIT_BREAKER_LIMIT_SETTING.getKey(), "100kb")
             .build();
