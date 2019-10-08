@@ -26,6 +26,7 @@ import org.elasticsearch.Version;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.search.InitialSearchActionListener;
 import org.elasticsearch.action.search.SearchExecutionStatsCollector;
+import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchTransportService;
 import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.breaker.CircuitBreakingException;
@@ -220,13 +221,15 @@ public class InboundHandler {
                     if (actionListener instanceof SearchExecutionStatsCollector) {
                         ActionListener initSearchActionListener = ((SearchExecutionStatsCollector) actionListener).getListener();
                         if (initSearchActionListener instanceof InitialSearchActionListener) {
-                            SearchSourceBuilder searchSourceBuilder =
-                                ((InitialSearchActionListener) initSearchActionListener).getSearchRequest().source();
-                            if (searchSourceBuilder != null) {
-                                AggregatorFactories.Builder aggs = searchSourceBuilder.aggregations();
-                                if (aggs != null && aggs.count() > 0) {
-                                    reservedBytes = messageLengthBytes * SearchService.getBucketDeserializeExpansionRatio();
-                                    breaker.addEstimateBytesAndMaybeBreak(reservedBytes, "<aggregation_transport_response>");
+                            SearchRequest searchRequest = ((InitialSearchActionListener) initSearchActionListener).getSearchRequest();
+                            if (searchRequest != null) {
+                                SearchSourceBuilder searchSourceBuilder = searchRequest.source();
+                                if (searchSourceBuilder != null) {
+                                    AggregatorFactories.Builder aggs = searchSourceBuilder.aggregations();
+                                    if (aggs != null && aggs.count() > 0) {
+                                        reservedBytes = messageLengthBytes * SearchService.getBucketDeserializeExpansionRatio();
+                                        breaker.addEstimateBytesAndMaybeBreak(reservedBytes, "<aggregation_transport_response>");
+                                    }
                                 }
                             }
                         }
