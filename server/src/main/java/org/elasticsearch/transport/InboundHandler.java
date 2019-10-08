@@ -26,6 +26,7 @@ import org.elasticsearch.Version;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.search.InitialSearchActionListener;
 import org.elasticsearch.action.search.SearchExecutionStatsCollector;
+import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.search.SearchTransportService;
 import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.common.breaker.CircuitBreakingException;
@@ -40,6 +41,7 @@ import org.elasticsearch.indices.breaker.CircuitBreakerService;
 import org.elasticsearch.search.SearchPhaseResult;
 import org.elasticsearch.search.SearchService;
 import org.elasticsearch.search.aggregations.AggregatorFactories;
+import org.elasticsearch.search.builder.SearchSourceBuilder;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import java.io.IOException;
@@ -219,8 +221,9 @@ public class InboundHandler {
                     if (actionListener instanceof SearchExecutionStatsCollector) {
                         ActionListener initSearchActionListener = ((SearchExecutionStatsCollector) actionListener).getListener();
                         if (initSearchActionListener instanceof InitialSearchActionListener) {
-                            AggregatorFactories.Builder aggs =
-                                ((InitialSearchActionListener) initSearchActionListener).getSearchRequest().source().aggregations();
+                            SearchRequest searchRequest = ((InitialSearchActionListener) initSearchActionListener).getSearchRequest();
+                            SearchSourceBuilder searchSourceBuilder = searchRequest.source();
+                            AggregatorFactories.Builder aggs = searchSourceBuilder.aggregations();
                             if (aggs != null && aggs.count() > 0) {
                                 reservedBytes = messageLengthBytes * SearchService.getBucketDeserializeExpansionRatio();
                                 breaker.addEstimateBytesAndMaybeBreak(reservedBytes, "<aggregation_transport_response>");
