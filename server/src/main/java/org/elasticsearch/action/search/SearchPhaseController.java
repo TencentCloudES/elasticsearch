@@ -669,6 +669,8 @@ public final class SearchPhaseController {
 
         @Override
         public ReducedQueryPhase reduce() {
+            // release last batch of buffered bytes
+            circuitBreakerService.getBreaker(CircuitBreaker.REQUEST).addWithoutBreaking(-bufferedResultBytes.get());
             return controller.reducedQueryPhase(results.asList(), getRemainingAggs(), getRemainingTopDocs(), topDocsStats,
                 numReducePhases, false, performFinalReduce);
         }
