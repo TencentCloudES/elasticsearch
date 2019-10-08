@@ -39,6 +39,7 @@ import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.indices.breaker.CircuitBreakerService;
 import org.elasticsearch.search.SearchPhaseResult;
 import org.elasticsearch.search.SearchService;
+import org.elasticsearch.search.aggregations.AggregatorFactories;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import java.io.IOException;
@@ -218,8 +219,9 @@ public class InboundHandler {
                     if (actionListener instanceof SearchExecutionStatsCollector) {
                         ActionListener initSearchActionListener = ((SearchExecutionStatsCollector) actionListener).getListener();
                         if (initSearchActionListener instanceof InitialSearchActionListener) {
-                            if (((InitialSearchActionListener) initSearchActionListener).getSearchRequest()
-                                .source().aggregations().count() > 0) {
+                            AggregatorFactories.Builder aggs =
+                                ((InitialSearchActionListener) initSearchActionListener).getSearchRequest().source().aggregations();
+                            if (aggs != null && aggs.count() > 0) {
                                 reservedBytes = messageLengthBytes * SearchService.getBucketDeserializeExpansionRatio();
                                 breaker.addEstimateBytesAndMaybeBreak(reservedBytes, "<aggregation_transport_response>");
                             }
