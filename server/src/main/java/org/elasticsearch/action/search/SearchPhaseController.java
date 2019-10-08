@@ -475,7 +475,7 @@ public final class SearchPhaseController {
             }
             if (consumeAggs) {
                 aggregationsList.add((InternalAggregations) result.consumeAggs());
-                needToReleaseBytes += result.getResultMemSize();
+                needToReleaseBytes += entry.getResultMemSize();
             }
             if (hasProfileResults) {
                 String key = result.getSearchShardTarget().toString();
