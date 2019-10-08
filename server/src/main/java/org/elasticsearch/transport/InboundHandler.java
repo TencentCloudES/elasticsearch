@@ -28,6 +28,7 @@ import org.elasticsearch.action.search.InitialSearchActionListener;
 import org.elasticsearch.action.search.SearchExecutionStatsCollector;
 import org.elasticsearch.action.search.SearchTransportService;
 import org.elasticsearch.common.breaker.CircuitBreaker;
+import org.elasticsearch.common.breaker.CircuitBreakingException;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.metrics.MeanMetric;
@@ -235,7 +236,7 @@ public class InboundHandler {
         } catch (Exception e) {
             handleException(handler, new TransportSerializationException(
                 "Failed to deserialize response from handler [" + handler.getClass().getName() + "]", e));
-            if (reservedBytes > 0) {
+            if (reservedBytes > 0 && !(e instanceof CircuitBreakingException)) {
                 breaker.addWithoutBreaking(-reservedBytes);
             }
             return;
