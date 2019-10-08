@@ -225,7 +225,8 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
                 final Thread thread = Thread.currentThread();
                 try {
                     executePhaseOnShard(shardIt, shard,
-                        new SearchActionListener<Result>(shardIt.newSearchShardTarget(shard.currentNodeId()), shardIndex) {
+                        new InitialSearchActionListener<Result>(shardIt.newSearchShardTarget(shard.currentNodeId()),
+                            shardIndex, request) {
                             @Override
                             public void innerOnResponse(Result result) {
                                 try {
