@@ -633,7 +633,8 @@ public final class SearchPhaseController {
                     InternalAggregations reducedAggs = InternalAggregations.reduce(Arrays.asList(aggsBuffer), reduceContext);
                     Arrays.fill(aggsBuffer, null);
                     aggsBuffer[0] = reducedAggs;
-                    circuitBreakerService.getBreaker(CircuitBreaker.REQUEST).addWithoutBreaking(-bufferedResultBytes.get());
+                    final long releaseBytes = bufferedResultBytes.getAndSet(0);
+                    circuitBreakerService.getBreaker(CircuitBreaker.REQUEST).addWithoutBreaking(-releaseBytes);
                 }
                 if (hasTopDocs) {
                     TopDocs reducedTopDocs = mergeTopDocs(Arrays.asList(topDocsBuffer),
