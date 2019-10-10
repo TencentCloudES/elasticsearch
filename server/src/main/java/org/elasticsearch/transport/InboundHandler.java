@@ -19,6 +19,7 @@
 
 package org.elasticsearch.transport;
 
+import com.google.common.collect.Sets;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
@@ -33,12 +34,15 @@ import org.elasticsearch.common.util.Maps;
 import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
 import org.elasticsearch.indices.breaker.CircuitBreakerService;
+import org.elasticsearch.search.SearchPhaseResult;
+import org.elasticsearch.search.SearchService;
 import org.elasticsearch.threadpool.ThreadPool;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.Collections;
 import java.util.Map;
+import java.util.Set;
 
 public class InboundHandler {
 
@@ -201,29 +205,52 @@ public class InboundHandler {
     private <T extends TransportResponse> void handleResponse(InetSocketAddress remoteAddress, final StreamInput stream,
                                                               final TransportResponseHandler<T> handler, int messageLengthBytes) {
         final T response;
-        long bytesNeedToRelease = 0;
-        CircuitBreaker breaker = circuitBreakerService.getBreaker(CircuitBreaker.REQUEST);
         try {
-            if (handler instanceof TransportService.ContextRestoreResponseHandler) {
-                TransportResponseHandler<T> delegate = ((TransportService.ContextRestoreResponseHandler<T>) handler).getDelegate();
-                if (delegate instanceof SearchTransportService.ConnectionCountingHandler && messageLengthBytes > 1024) {
-                    // the main purpose is to check memory before deserialization for large size of response
-                    bytesNeedToRelease = messageLengthBytes;
-                    breaker.addEstimateBytesAndMaybeBreak(messageLengthBytes, "<transport_response>");
-                }
-            }
-
             response = handler.read(stream);
             response.remoteAddress(new TransportAddress(remoteAddress));
+
+            try {
+                if (response instanceof SearchPhaseResult && ((SearchPhaseResult) response).queryResult().size()>0) {
+                    logger.info("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+                    ObjectSizeCalculator.MemoryLayoutSpecification memoryLayoutSpecification =
+                        new ObjectSizeCalculator.MemoryLayoutSpecification() {
+                            public int getArrayHeaderSize() {
+                                // TODO Auto-generated method stub
+                                return 24;
+                            }
+
+                            public int getObjectHeaderSize() {
+                                // TODO Auto-generated method stub
+                                return 16;
+                            }
+
+                            public int getObjectPadding() {
+                                // TODO Auto-generated method stub
+                                return 8;
+                            }
+
+                            public int getReferenceSize() {
+                                // TODO Auto-generated method stub
+                                return 8;
+                            }
+
+                            public int getSuperclassFieldPadding() {
+                                // TODO Auto-generated method stub
+                                return 8;
+                            }
+                        };
+                    ObjectSizeCalculator objectSizeCalculator = new ObjectSizeCalculator(memoryLayoutSpecification);
+                    long oSize = objectSizeCalculator.calculateObjectSize(response);
+                    logger.info("before size[{}], after size[{}], ratio[{}]", messageLengthBytes, oSize, (double) oSize / (double) messageLengthBytes);
+                }
+            }catch (Throwable t) {
+                logger.info("get throwable error:[{}]", t.getCause());
+            }
+
         } catch (Exception e) {
             handleException(handler, new TransportSerializationException(
                 "Failed to deserialize response from handler [" + handler.getClass().getName() + "]", e));
             return;
-        } finally {
-            // release message bytes from request breaker even the real memory has not been released yet
-            if (bytesNeedToRelease > 0) {
-                breaker.addWithoutBreaking(-bytesNeedToRelease);
-            }
         }
         threadPool.executor(handler.executor()).execute(new AbstractRunnable() {
             @Override

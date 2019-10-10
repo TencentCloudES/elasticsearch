@@ -19,6 +19,7 @@
 
 package org.elasticsearch.indices.memory.breaker;
 
+import com.carrotsearch.randomizedtesting.generators.RandomStrings;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.action.admin.cluster.node.stats.NodeStats;
 import org.elasticsearch.action.admin.cluster.node.stats.NodesStatsResponse;
@@ -58,6 +59,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
+import static com.carrotsearch.randomizedtesting.RandomizedTest.getRandom;
 import static org.elasticsearch.cluster.metadata.IndexMetaData.SETTING_NUMBER_OF_REPLICAS;
 import static org.elasticsearch.index.query.QueryBuilders.matchAllQuery;
 import static org.elasticsearch.search.aggregations.AggregationBuilders.cardinality;
@@ -289,6 +291,66 @@ public class CircuitBreakerServiceIT extends ESIntegTestCase {
             assertThat(cause, instanceOf(CircuitBreakingException.class));
             assertThat(cause.toString(), containsString("[request] Data too large, data for [<agg [my_terms]>] would be"));
             assertThat(cause.toString(), containsString("which is larger than the limit of [100/100b]"));
+        }
+    }
+
+    public void testCoordinateNodeRequestBreaker() throws Exception {
+        if (noopBreakerUsed()) {
+            logger.info("--> noop breakers used, skipping test");
+            return;
+        }
+
+        internalCluster().ensureAtLeastNumDataNodes(3);
+
+        NodesStatsResponse nodeStats = client().admin().cluster().prepareNodesStats().get();
+        List<NodeStats> dataNodeStats = new ArrayList<>();
+        for (NodeStats stat : nodeStats.getNodes()) {
+            if (stat.getNode().isDataNode()) {
+                dataNodeStats.add(stat);
+            }
+        }
+
+        assertThat(dataNodeStats.size(),greaterThanOrEqualTo(3));
+        Collections.shuffle(dataNodeStats, random());
+
+        // send request to target coordinate node.
+        NodeStats targetNode = dataNodeStats.get(0);
+        Client client = client(targetNode.getNode().getName());
+
+        assertAcked(prepareCreate("cb-test").setSettings(Settings.builder()
+            .put(IndexMetaData.SETTING_NUMBER_OF_REPLICAS, 1)
+            .put(IndexMetaData.SETTING_NUMBER_OF_SHARDS, 1)
+            .put("index.routing.allocation.exclude._name", targetNode.getNode().getName()) // make sure other nodes take shard
+            .put(EnableAllocationDecider.INDEX_ROUTING_REBALANCE_ENABLE_SETTING.getKey(), EnableAllocationDecider.Rebalance.NONE))
+            .addMapping("type", "test", "type=text,fielddata=true"));
+
+        // Make request breaker limited to bigger than data node request memory consumption
+        // and less than coordinate node total response size
+        Settings resetSettings = Settings.builder()
+            .put(HierarchyCircuitBreakerService.REQUEST_CIRCUIT_BREAKER_LIMIT_SETTING.getKey(), "100kb")
+            .build();
+        assertAcked(client.admin().cluster().prepareUpdateSettings().setTransientSettings(resetSettings));
+
+        // index some different string terms so we have some field data for loading
+        List<IndexRequestBuilder> reqs = new ArrayList<>();
+        for (long id = 0; id < 10000; id++) {
+            reqs.add(client.prepareIndex("cb-test", "type", Long.toString(id))
+                .setSource("test", RandomStrings.randomAsciiAlphanumOfLength(getRandom(), 10)));
+        }
+        indexRandom(true, reqs);
+
+        // A terms aggregation on the "test" field should trip the coordinate node request circuit breaker
+        try {
+            SearchResponse resp = client.prepareSearch("cb-test")
+                .setQuery(matchAllQuery())
+                .addAggregation(terms("my_terms").field("test").size(10000))
+                .get();
+            //fail("coordinate node transport response should have tripped the breaker");
+        } catch (Exception e) {
+            Throwable cause = e.getCause();
+            assertThat(cause, instanceOf(CircuitBreakingException.class));
+            assertThat(cause.toString(), containsString("[request] Data too large, data for [<aggregation_transport_response>] would be"));
+            assertThat(cause.toString(), containsString("which is larger than the limit of [102400/100kb]"));
         }
     }
 

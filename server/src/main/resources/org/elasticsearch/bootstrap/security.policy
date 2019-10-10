@@ -58,6 +58,10 @@ grant codeBase "${codebase.jna}" {
 };
 
 //// Everything else:
+grant {
+  permission java.lang.RuntimePermission "accessDeclaredMembers";
+  permission java.lang.reflect.ReflectPermission "suppressAccessChecks";
+};
 
 grant {
   // needed by vendored Guice

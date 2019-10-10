@@ -99,6 +99,9 @@ dependencies {
   compile "org.apache.lucene:lucene-spatial3d:${versions.lucene}"
   compile "org.apache.lucene:lucene-suggest:${versions.lucene}"
 
+  compile 'com.google.guava:guava:26.0-jre'
+  compile group: 'com.google.errorprone', name: 'error_prone_annotations', version: '2.3.3'
+
   // utilities
   compile project(":libs:elasticsearch-cli")
   compile 'com.carrotsearch:hppc:0.8.1'
