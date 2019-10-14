@@ -707,8 +707,10 @@ public class CompositeAggregatorTests extends AggregatorTestCase {
             }
             try (IndexReader indexReader = DirectoryReader.open(directory)) {
                 IndexSearcher indexSearcher = new IndexSearcher(indexReader);
-                MultiBucketConsumerService.MultiBucketConsumer bucketConsumer = new MultiBucketConsumerService.MultiBucketConsumer(DEFAULT_MAX_BUCKETS);
-                CompositeAggregator a = createAggregator(query, aggregationBuilder, indexSearcher, indexSettings, bucketConsumer, FIELD_TYPES);
+                MultiBucketConsumerService.MultiBucketConsumer bucketConsumer =
+                    new MultiBucketConsumerService.MultiBucketConsumer(DEFAULT_MAX_BUCKETS);
+                CompositeAggregator a = createAggregator(query, aggregationBuilder, indexSearcher,
+                    indexSettings, bucketConsumer, FIELD_TYPES);
                 a.preCollection();
                 indexSearcher.search(query, a);
                 a.postCollection();
