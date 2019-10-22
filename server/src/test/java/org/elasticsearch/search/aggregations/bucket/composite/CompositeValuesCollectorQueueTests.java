@@ -279,7 +279,7 @@ public class CompositeValuesCollectorQueueTests extends AggregatorTestCase {
                         final LeafBucketCollector leafCollector = new LeafBucketCollector() {
                             @Override
                             public void collect(int doc, long bucket) throws IOException {
-                                queue.addIfCompetitive();
+                                queue.addIfCompetitive(-1);
                             }
                         };
                         if (docsProducer != null && withProducer) {

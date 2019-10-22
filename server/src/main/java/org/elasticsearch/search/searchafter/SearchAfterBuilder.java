@@ -108,7 +108,7 @@ public class SearchAfterBuilder implements ToXContentObject, Writeable {
         }
 
         SortField[] sortFields = sort.sort.getSort();
-        if (sortFields.length != values.length) {
+        if (sortFields.length > values.length) {
             throw new IllegalArgumentException(
                     SEARCH_AFTER.getPreferredName() + " has " + values.length + " value(s) but sort has "
                             + sort.sort.getSort().length + ".");
@@ -172,25 +172,25 @@ public class SearchAfterBuilder implements ToXContentObject, Writeable {
                     if (value instanceof Number) {
                         return ((Number) value).intValue();
                     }
-                    return Integer.parseInt(value.toString());
+                    return (int) format.parseLong(value.toString(), false, null);
 
                 case DOUBLE:
                     if (value instanceof Number) {
                         return ((Number) value).doubleValue();
                     }
-                    return Double.parseDouble(value.toString());
+                    return format.parseDouble(value.toString(), false, null);
 
                 case LONG:
                     if (value instanceof Number) {
                         return ((Number) value).longValue();
                     }
-                    return Long.parseLong(value.toString());
+                    return format.parseLong(value.toString(), false, () -> System.currentTimeMillis());
 
                 case FLOAT:
                     if (value instanceof Number) {
                         return ((Number) value).floatValue();
                     }
-                    return Float.parseFloat(value.toString());
+                    return (float) format.parseDouble(value.toString(), false, null);
 
                 case STRING_VAL:
                 case STRING:
@@ -202,7 +202,8 @@ public class SearchAfterBuilder implements ToXContentObject, Writeable {
             }
         } catch(NumberFormatException e) {
             throw new IllegalArgumentException(
-                    "Failed to parse " + SEARCH_AFTER.getPreferredName() + " value for field [" + fieldName + "].", e);
+                "Failed to parse " + SEARCH_AFTER.getPreferredName()
+                    + " value for field [" + fieldName + "] with format [" + format.toString() + "], got " + value.toString(), e);
         }
     }
 

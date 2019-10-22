@@ -20,18 +20,28 @@
 package org.elasticsearch.search.aggregations.bucket.composite;
 
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.DocValues;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.index.SortedNumericDocValues;
+import org.apache.lucene.index.SortedSetDocValues;
+import org.apache.lucene.queries.SearchAfterSortedDocQuery;
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.CollectionTerminatedException;
 import org.apache.lucene.search.DocIdSet;
 import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.search.FieldDoc;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
+import org.apache.lucene.search.Sort;
+import org.apache.lucene.search.SortField;
 import org.apache.lucene.search.Weight;
 import org.apache.lucene.util.RoaringDocIdSet;
 import org.elasticsearch.common.lease.Releasables;
 import org.elasticsearch.common.util.BigArrays;
+import org.elasticsearch.index.IndexSortConfig;
 import org.elasticsearch.search.DocValueFormat;
 import org.elasticsearch.search.aggregations.Aggregator;
 import org.elasticsearch.search.aggregations.AggregatorFactories;
@@ -46,6 +56,8 @@ import org.elasticsearch.search.aggregations.bucket.geogrid.CellIdSource;
 import org.elasticsearch.search.aggregations.pipeline.PipelineAggregator;
 import org.elasticsearch.search.aggregations.support.ValuesSource;
 import org.elasticsearch.search.internal.SearchContext;
+import org.elasticsearch.search.searchafter.SearchAfterBuilder;
+import org.elasticsearch.search.sort.SortAndFormats;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -60,7 +72,6 @@ import static org.elasticsearch.search.aggregations.MultiBucketConsumerService.M
 
 final class CompositeAggregator extends BucketsAggregator {
     private final int size;
-    private final SortedDocsProducer sortedDocsProducer;
     private final List<String> sourceNames;
     private final int[] reverseMuls;
     private final List<DocValueFormat> formats;
@@ -72,6 +83,8 @@ final class CompositeAggregator extends BucketsAggregator {
     private LeafReaderContext currentLeaf;
     private RoaringDocIdSet.Builder docIdSetBuilder;
     private BucketCollector deferredCollectors;
+
+    private final CompositeKey rawAfterKey;
 
     CompositeAggregator(String name, AggregatorFactories factories, SearchContext context, Aggregator parent,
                         List<PipelineAggregator> pipelineAggregators, Map<String, Object> metaData,
@@ -93,7 +106,7 @@ final class CompositeAggregator extends BucketsAggregator {
             this.sources[i] = createValuesSource(context.bigArrays(), context.searcher().getIndexReader(), sourceConfigs[i], size);
         }
         this.queue = new CompositeValuesCollectorQueue(context.bigArrays(), sources, size, rawAfterKey);
-        this.sortedDocsProducer = sources[0].createSortedDocsProducerOrNull(context.searcher().getIndexReader(), context.query());
+        this.rawAfterKey = rawAfterKey;
     }
 
     @Override
@@ -160,50 +173,83 @@ final class CompositeAggregator extends BucketsAggregator {
     protected LeafBucketCollector getLeafCollector(LeafReaderContext ctx, LeafBucketCollector sub) throws IOException {
         finishLeaf();
         boolean fillDocIdSet = deferredCollectors != NO_OP_COLLECTOR;
-        if (sortedDocsProducer != null) {
-            /*
-              The producer will visit documents sorted by the leading source of the composite definition
-              and terminates when the leading source value is guaranteed to be greater than the lowest
-              composite bucket in the queue.
-             */
-            DocIdSet docIdSet = sortedDocsProducer.processLeaf(context.query(), queue, ctx, fillDocIdSet);
-            if (fillDocIdSet) {
-                entries.add(new Entry(ctx, docIdSet));
-            }
+        Sort indexSortPrefix = buildIndexSortPrefix(ctx);
+        int sortPrefixLen = indexSortPrefix != null ? indexSortPrefix.getSort().length : 0;
+        SortedDocsProducer sortedDocsProducer = sortPrefixLen == 0 ?
+            sources[0].createSortedDocsProducerOrNull(ctx.reader(), context.query()) : null;
 
-            /*
-              We can bypass search entirely for this segment, all the processing has been done in the previous call.
-              Throwing this exception will terminate the execution of the search for this root aggregation,
-              see {@link org.apache.lucene.search.MultiCollector} for more details on how we handle early termination in aggregations.
-             */
+        if (sortedDocsProducer != null) {
+            processLeafFromIndex(ctx, sortedDocsProducer, fillDocIdSet);
+
             throw new CollectionTerminatedException();
-        } else {
+        }
+
+        if (rawAfterKey != null && sortPrefixLen > 0) {
+            // we have an after key and index sort is applicable so we jump directly to the doc
+            // that is after the index sort prefix using the rawAfterKey and we start collecting
+            // document from there.
+            DocValueFormat[] formats = new DocValueFormat[indexSortPrefix.getSort().length];
+            for (int i = 0; i < formats.length; i++) {
+                formats[i] = sources[i].format;
+            }
+            FieldDoc fieldDoc = SearchAfterBuilder.buildFieldDoc(new SortAndFormats(indexSortPrefix, formats), rawAfterKey.values());
+            if (indexSortPrefix.getSort().length < sources.length) {
+                // include all docs that belong to the partial bucket
+                fieldDoc.doc = 0;
+            }
+            BooleanQuery newQuery = new BooleanQuery.Builder()
+                .add(context.query(), BooleanClause.Occur.MUST)
+                .add(new SearchAfterSortedDocQuery(indexSortPrefix, fieldDoc), BooleanClause.Occur.FILTER)
+                .build();
+            Weight weight = context.searcher().createWeight(context.searcher().rewrite(newQuery),
+                ScoreMode.COMPLETE_NO_SCORES, 1f);
+
             if (fillDocIdSet) {
                 currentLeaf = ctx;
                 docIdSetBuilder = new RoaringDocIdSet.Builder(ctx.reader().maxDoc());
             }
-            final LeafBucketCollector inner = queue.getLeafCollector(ctx, getFirstPassCollector(docIdSetBuilder));
-            return new LeafBucketCollector() {
-                @Override
-                public void collect(int doc, long zeroBucket) throws IOException {
-                    assert zeroBucket == 0L;
-                    inner.collect(doc);
+
+            Scorer scorer = weight.scorer(ctx);
+            if (scorer != null) {
+                DocIdSetIterator docIt = scorer.iterator();
+                final LeafBucketCollector inner = queue.getLeafCollector(ctx, getFirstPassCollector(docIdSetBuilder, sortPrefixLen));
+                inner.setScorer(scorer);
+                try {
+                    while (docIt.nextDoc() != DocIdSetIterator.NO_MORE_DOCS) {
+                        inner.collect(docIt.docID());
+                    }
+                } catch (CollectionTerminatedException exc) {
+                    throw exc;
                 }
-            };
+            }
+            throw new CollectionTerminatedException();
         }
+
+        if (fillDocIdSet) {
+            currentLeaf = ctx;
+            docIdSetBuilder = new RoaringDocIdSet.Builder(ctx.reader().maxDoc());
+        }
+        final LeafBucketCollector inner = queue.getLeafCollector(ctx, getFirstPassCollector(docIdSetBuilder, sortPrefixLen));
+        return new LeafBucketCollector() {
+            @Override
+            public void collect(int doc, long zeroBucket) throws IOException {
+                assert zeroBucket == 0L;
+                inner.collect(doc);
+            }
+        };
+
     }
 
     /**
      * The first pass selects the top composite buckets from all matching documents.
      */
-    private LeafBucketCollector getFirstPassCollector(RoaringDocIdSet.Builder builder) {
+    private LeafBucketCollector getFirstPassCollector(RoaringDocIdSet.Builder builder, int indexSortPrefix) {
         return new LeafBucketCollector() {
             int lastDoc = -1;
 
             @Override
             public void collect(int doc, long bucket) throws IOException {
-                int slot = queue.addIfCompetitive();
-                if (slot != -1) {
+                if (queue.addIfCompetitive(indexSortPrefix)) {
                     if (builder != null && lastDoc != doc) {
                         builder.add(doc);
                         lastDoc = doc;
@@ -271,6 +317,71 @@ final class CompositeAggregator extends BucketsAggregator {
             }
         };
     }
+
+
+    /** Return true if the provided field has multiple values per document in the leaf **/
+    private boolean isMultiValued(LeafReaderContext context, SortField sortField) throws IOException {
+        SortField.Type type = IndexSortConfig.getSortFieldType(sortField);
+        if (type == SortField.Type.STRING) {
+            final SortedSetDocValues values = context.reader().getSortedSetDocValues(sortField.getField());
+            if (values != null && DocValues.unwrapSingleton(values) != null) {
+                return false;
+            }
+        } else {
+            final SortedNumericDocValues values = context.reader().getSortedNumericDocValues(sortField.getField());
+            if (values != null && DocValues.unwrapSingleton(values) != null) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Returns the {@link Sort} prefix that that is eligible to index sort
+     * optimization and null if index sort is not applicable.
+     */
+    private Sort buildIndexSortPrefix(LeafReaderContext context) throws IOException {
+        Sort indexSort = context.reader().getMetaData().getSort();
+        if (indexSort == null) {
+            return null;
+        }
+        List<SortField> sortFields = new ArrayList<>();
+        for (int i = 0; i < indexSort.getSort().length; i++) {
+            SingleDimensionValuesSource<?> source = sources[i];
+            SortField indexSortField = indexSort.getSort()[i];
+            if (source.fieldType == null
+                // TODO: can we handle missing bucket when using index sort optimization
+                || source.missingBucket
+                || indexSortField.getField().equals(source.fieldType.name()) == false
+                || indexSortField.getReverse() != (source.reverseMul == -1)
+                || isMultiValued(context, indexSortField)) {
+                // TODO: ignore fields that change the value with a script
+                break;
+            }
+            sortFields.add(indexSortField);
+        }
+        return sortFields.isEmpty() ? null : new Sort(sortFields.toArray(new SortField[0]));
+    }
+
+    /**
+     * Visit documents sorted by the leading source of the composite definition
+     * and terminates when the leading source value is guaranteed to be greater than the lowest
+     * composite bucket in the queue.
+     */
+    private void processLeafFromIndex(LeafReaderContext ctx, SortedDocsProducer sortedDocsProducer, boolean fillDocIdSet) throws IOException {
+        DocIdSet docIdSet = sortedDocsProducer.processLeaf(context.query(), queue, ctx, fillDocIdSet);
+        if (fillDocIdSet) {
+            entries.add(new Entry(ctx, docIdSet));
+        }
+        /**
+         * We can bypass search entirely for this segment, all the processing has been done in the previous call.
+         * Throwing this exception will terminate the execution of the search for this root aggregation,
+         * see {@link org.apache.lucene.search.MultiCollector} for more details on how we handle early termination in aggregations.
+         **/
+        throw new CollectionTerminatedException();
+    }
+
+
 
     private SingleDimensionValuesSource<?> createValuesSource(BigArrays bigArrays, IndexReader reader,
                                                               CompositeValuesSourceConfig config, int size) {

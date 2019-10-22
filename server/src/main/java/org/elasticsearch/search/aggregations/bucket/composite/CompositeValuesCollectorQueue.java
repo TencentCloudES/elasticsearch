@@ -20,6 +20,7 @@
 package org.elasticsearch.search.aggregations.bucket.composite;
 
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.search.CollectionTerminatedException;
 import org.apache.lucene.util.PriorityQueue;
 import org.elasticsearch.common.lease.Releasable;
 import org.elasticsearch.common.lease.Releasables;
@@ -153,7 +154,7 @@ final class CompositeValuesCollectorQueue extends PriorityQueue<Integer> impleme
                 cmp = arrays[i].compare(slot1, slot2);
             }
             if (cmp != 0) {
-                return cmp;
+                return cmp > 0 ? i+1 : -(i+1);
             }
         }
         return 0;
@@ -246,23 +247,28 @@ final class CompositeValuesCollectorQueue extends PriorityQueue<Integer> impleme
      * Check if the current candidate should be added in the queue.
      * @return The target slot of the candidate or -1 is the candidate is not competitive.
      */
-    int addIfCompetitive() {
+    boolean addIfCompetitive(int indexSortSourcePrefix) {
         // checks if the candidate key is competitive
         Integer topSlot = compareCurrent();
         if (topSlot != null) {
             // this key is already in the top N, skip it
             docCounts.increment(topSlot, 1);
-            return topSlot;
+            return true;
         }
         if (afterKeyIsSet && compareCurrentWithAfter() <= 0) {
             // this key is greater than the top value collected in the previous round, skip it
-            return -1;
+            return false;
         }
-        if (size() >= maxSize
+        if (size() >= maxSize) {
                 // the tree map is full, check if the candidate key should be kept
-                && compare(CANDIDATE_SLOT, top()) > 0) {
+            int cmp = compare(CANDIDATE_SLOT, top());
+            if (cmp > 0) {
+                if (cmp - 1 < indexSortSourcePrefix) {
+                    throw new CollectionTerminatedException();
+                }
             // the candidate key is not competitive, skip it
-            return -1;
+            return false;
+            }
         }
 
         // the candidate key is competitive
@@ -280,7 +286,7 @@ final class CompositeValuesCollectorQueue extends PriorityQueue<Integer> impleme
         copyCurrent(newSlot);
         map.put(new Slot(newSlot), newSlot);
         add(newSlot);
-        return newSlot;
+        return true;
     }
 
     @Override
