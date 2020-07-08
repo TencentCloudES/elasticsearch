@@ -411,10 +411,10 @@ public final class UnassignedInfo implements ToXContentFragment, Writeable {
      */
     public static Tuple<Long, Integer> findNextDelayedAllocation(long currentNanoTime, ClusterState state) {
         Metadata metadata = state.metadata();
-        RoutingTable routingTable = state.routingTable();
+        final RoutingNodes routingNodes = state.getRoutingNodes();
         long nextDelayNanos = Long.MAX_VALUE;
         int delayShardCount = 0;
-        for (ShardRouting shard : routingTable.shardsWithState(ShardRoutingState.UNASSIGNED)) {
+        for (ShardRouting shard : routingNodes.unassigned()) {
             UnassignedInfo unassignedInfo = shard.unassignedInfo();
             if (unassignedInfo.isDelayed()) {
                 delayShardCount++;
