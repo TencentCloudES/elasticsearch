@@ -72,20 +72,26 @@ public class IndexRoutingTable extends AbstractDiffable<IndexRoutingTable> imple
     private final ImmutableOpenIntMap<IndexShardRoutingTable> shards;
 
     private final List<ShardRouting> allActiveShards;
+    private final List<ShardRouting> allAssignedShards;
 
     IndexRoutingTable(Index index, ImmutableOpenIntMap<IndexShardRoutingTable> shards) {
         this.index = index;
         this.shuffler = new RotationShardShuffler(Randomness.get().nextInt());
         this.shards = shards;
         List<ShardRouting> allActiveShards = new ArrayList<>();
+        List<ShardRouting> allAssignedShards = new ArrayList<>();
         for (IntObjectCursor<IndexShardRoutingTable> cursor : shards) {
             for (ShardRouting shardRouting : cursor.value) {
                 if (shardRouting.active()) {
                     allActiveShards.add(shardRouting);
                 }
+                if (shardRouting.initializing() || shardRouting.started()) {
+                    allAssignedShards.add(shardRouting);
+                }
             }
         }
         this.allActiveShards = Collections.unmodifiableList(allActiveShards);
+        this.allAssignedShards = Collections.unmodifiableList(allAssignedShards);
     }
 
     /**
@@ -205,6 +211,13 @@ public class IndexRoutingTable extends AbstractDiffable<IndexRoutingTable> imple
 
     public IndexShardRoutingTable shard(int shardId) {
         return shards.get(shardId);
+    }
+
+    /**
+     * Returns all assigned shards including STARTED and INITIALIZING shards.
+     */
+    public List<ShardRouting> getAllAssignedShards() {
+        return allAssignedShards;
     }
 
     /**

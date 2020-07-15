@@ -25,8 +25,10 @@ import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.IntroSorter;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.metadata.Metadata;
+import org.elasticsearch.cluster.routing.IndexRoutingTable;
 import org.elasticsearch.cluster.routing.RoutingNode;
 import org.elasticsearch.cluster.routing.RoutingNodes;
+import org.elasticsearch.cluster.routing.RoutingTable;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.cluster.routing.ShardRoutingState;
 import org.elasticsearch.cluster.routing.UnassignedInfo;
@@ -61,8 +63,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.StreamSupport;
-
-import static org.elasticsearch.cluster.routing.ShardRoutingState.RELOCATING;
 
 /**
  * The {@link BalancedShardsAllocator} re-balances the nodes allocations
@@ -239,6 +239,7 @@ public class BalancedShardsAllocator implements ShardsAllocator {
         private final Map<String, ModelNode> nodes;
         private final RoutingAllocation allocation;
         private final RoutingNodes routingNodes;
+        private final RoutingTable routingTable;
         private final WeightFunction weight;
 
         private final float threshold;
@@ -252,6 +253,7 @@ public class BalancedShardsAllocator implements ShardsAllocator {
             this.weight = weight;
             this.threshold = threshold;
             this.routingNodes = allocation.routingNodes();
+            this.routingTable = allocation.routingTable();
             this.metadata = allocation.metadata();
             avgShardsPerNode = ((float) metadata.getTotalNumberOfShards()) / routingNodes.size();
             nodes = Collections.unmodifiableMap(buildModelFromAssigned());
@@ -733,18 +735,9 @@ public class BalancedShardsAllocator implements ShardsAllocator {
         private Map<String, ModelNode> buildModelFromAssigned() {
             Map<String, ModelNode> nodes = new HashMap<>();
             for (RoutingNode rn : routingNodes) {
-                ModelNode node = new ModelNode(rn);
+                ModelNode node = new ModelNode(rn, routingTable);
+                node.setNumShards(rn.numberOfOwningShards());
                 nodes.put(rn.nodeId(), node);
-                for (ShardRouting shard : rn) {
-                    assert rn.nodeId().equals(shard.currentNodeId());
-                    /* we skip relocating shards here since we expect an initializing shard with the same id coming in */
-                    if (shard.state() != RELOCATING) {
-                        node.addShard(shard);
-                        if (logger.isTraceEnabled()) {
-                            logger.trace("Assigned shard [{}] to node [{}]", shard, node.getNodeId());
-                        }
-                    }
-                }
             }
             return nodes;
         }
@@ -1036,13 +1029,31 @@ public class BalancedShardsAllocator implements ShardsAllocator {
         private final Map<String, ModelIndex> indices = new HashMap<>();
         private int numShards = 0;
         private final RoutingNode routingNode;
+        private final RoutingTable routingTable;
 
-        ModelNode(RoutingNode routingNode) {
+        ModelNode(RoutingNode routingNode, RoutingTable routingTable) {
             this.routingNode = routingNode;
+            this.routingTable = routingTable;
         }
 
         public ModelIndex getIndex(String indexId) {
-            return indices.get(indexId);
+            ModelIndex index = indices.get(indexId);
+            if (index == null) {
+                // try to load from routing table and cache it
+                IndexRoutingTable indexRouting = this.routingTable.index(indexId);
+                if (indexRouting != null) {
+                    index = new ModelIndex(indexId);
+                    for (ShardRouting shard : indexRouting.getAllAssignedShards()) {
+                        // figure out current node shards
+                        if (shard.currentNodeId().equals(routingNode.nodeId())) {
+                            index.addShard(shard);
+                        }
+                    }
+                    indices.put(indexId, index);
+                    return index;
+                }
+            }
+            return index;
         }
 
         public String getNodeId() {
@@ -1058,12 +1069,16 @@ public class BalancedShardsAllocator implements ShardsAllocator {
         }
 
         public int numShards(String idx) {
-            ModelIndex index = indices.get(idx);
+            ModelIndex index = getIndex(idx);
             return index == null ? 0 : index.numShards();
         }
 
+        public void setNumShards(int numShards) {
+            this.numShards = numShards;
+        }
+
         public int highestPrimary(String index) {
-            ModelIndex idx = indices.get(index);
+            ModelIndex idx = getIndex(index);
             if (idx != null) {
                 return idx.highestPrimary();
             }
@@ -1071,7 +1086,7 @@ public class BalancedShardsAllocator implements ShardsAllocator {
         }
 
         public void addShard(ShardRouting shard) {
-            ModelIndex index = indices.get(shard.getIndexName());
+            ModelIndex index = getIndex(shard.getIndexName());
             if (index == null) {
                 index = new ModelIndex(shard.getIndexName());
                 indices.put(index.getIndexId(), index);
@@ -1081,7 +1096,7 @@ public class BalancedShardsAllocator implements ShardsAllocator {
         }
 
         public void removeShard(ShardRouting shard) {
-            ModelIndex index = indices.get(shard.getIndexName());
+            ModelIndex index = getIndex(shard.getIndexName());
             if (index != null) {
                 index.removeShard(shard);
                 if (index.numShards() == 0) {
