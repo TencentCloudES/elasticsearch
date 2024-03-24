@@ -9,7 +9,6 @@ package org.elasticsearch.xpack.application.analytics.event;
 
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.collect.MapBuilder;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
@@ -20,12 +19,15 @@ import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xcontent.json.JsonXContent;
 import org.elasticsearch.xpack.application.analytics.AnalyticsCollection;
-import org.elasticsearch.xpack.application.analytics.AnalyticsTemplateRegistry;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+
+import static org.elasticsearch.xpack.application.analytics.AnalyticsConstants.EVENT_DATA_STREAM_DATASET;
+import static org.elasticsearch.xpack.application.analytics.AnalyticsConstants.EVENT_DATA_STREAM_TYPE;
 
 /**
  * This class represents Analytics events object meant to be emitted to the event queue.
@@ -39,44 +41,6 @@ public class AnalyticsEvent implements Writeable, ToXContentObject {
     public static final ParseField DATA_STREAM_TYPE_FIELD = new ParseField("type");
     public static final ParseField DATA_STREAM_NAMESPACE_FIELD = new ParseField("namespace");
     public static final ParseField DATA_STREAM_DATASET_FIELD = new ParseField("dataset");
-
-    /**
-     * Analytics context. Used to carry information to parsers.
-     */
-    public interface Context {
-        long eventTime();
-
-        Type eventType();
-
-        String eventCollectionName();
-
-        default AnalyticsCollection analyticsCollection() {
-            return new AnalyticsCollection(eventCollectionName());
-        }
-    }
-
-    static class AnalyticsEventContext implements Context {
-        private final AnalyticsEvent event;
-
-        AnalyticsEventContext(AnalyticsEvent event) {
-            this.event = Objects.requireNonNull(event, "event cannot be null");
-        }
-
-        @Override
-        public long eventTime() {
-            return event.eventTime();
-        }
-
-        @Override
-        public Type eventType() {
-            return event.eventType();
-        }
-
-        @Override
-        public String eventCollectionName() {
-            return event.eventCollectionName();
-        }
-    }
 
     /**
      * Analytics event types.
@@ -154,10 +118,6 @@ public class AnalyticsEvent implements Writeable, ToXContentObject {
         return XContentHelper.convertToMap(payload(), true, xContentType()).v2();
     }
 
-    public Context context() {
-        return new AnalyticsEventContext(this);
-    }
-
     @Override
     public void writeTo(StreamOutput out) throws IOException {
         out.writeString(eventCollectionName);
@@ -181,8 +141,8 @@ public class AnalyticsEvent implements Writeable, ToXContentObject {
 
             builder.startObject(DATA_STREAM_FIELD.getPreferredName());
             {
-                builder.field(DATA_STREAM_TYPE_FIELD.getPreferredName(), AnalyticsTemplateRegistry.EVENT_DATA_STREAM_TYPE);
-                builder.field(DATA_STREAM_DATASET_FIELD.getPreferredName(), AnalyticsTemplateRegistry.EVENT_DATA_STREAM_DATASET);
+                builder.field(DATA_STREAM_TYPE_FIELD.getPreferredName(), EVENT_DATA_STREAM_TYPE);
+                builder.field(DATA_STREAM_DATASET_FIELD.getPreferredName(), EVENT_DATA_STREAM_DATASET);
                 builder.field(DATA_STREAM_NAMESPACE_FIELD.getPreferredName(), eventCollectionName());
 
             }
@@ -193,11 +153,6 @@ public class AnalyticsEvent implements Writeable, ToXContentObject {
         builder.endObject();
 
         return builder;
-    }
-
-    @Override
-    public boolean isFragment() {
-        return false;
     }
 
     @Override
@@ -213,17 +168,39 @@ public class AnalyticsEvent implements Writeable, ToXContentObject {
     }
 
     @Override
-    public String toString() {
-        return Strings.toString(this);
-    }
-
-    @Override
     public int hashCode() {
         return Objects.hash(eventCollectionName, eventTime, xContentType, payloadAsMap());
     }
 
+    @Override
+    public String toString() {
+        return Strings.toString(this);
+    }
+
+    /**
+     * Analytics context. Used to carry information to parsers.
+     */
+    public interface Context {
+        long eventTime();
+
+        Type eventType();
+
+        String eventCollectionName();
+
+        String userAgent();
+
+        String clientAddress();
+
+        default AnalyticsCollection analyticsCollection() {
+            // TODO: remove. Only used in tests.
+            return new AnalyticsCollection(eventCollectionName());
+        }
+
+        // TODO: Move the interface to the package (renamed into AnalyticsContext)
+    }
+
     public static class Builder {
-        private final MapBuilder<String, Object> payloadBuilder = new MapBuilder<>();
+        private final Map<String, Object> payloadBuilder = new HashMap<>();
 
         private final Context context;
 
@@ -233,7 +210,7 @@ public class AnalyticsEvent implements Writeable, ToXContentObject {
 
         public AnalyticsEvent build() throws IOException {
             try (XContentBuilder builder = JsonXContent.contentBuilder()) {
-                BytesReference payload = BytesReference.bytes(builder.map(payloadBuilder.map()));
+                BytesReference payload = BytesReference.bytes(builder.map(payloadBuilder));
                 return new AnalyticsEvent(
                     context.eventCollectionName(),
                     context.eventTime(),

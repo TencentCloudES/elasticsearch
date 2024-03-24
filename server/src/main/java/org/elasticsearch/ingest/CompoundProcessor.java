@@ -39,10 +39,12 @@ public class CompoundProcessor implements Processor {
         this(false, List.of(processors), List.of());
     }
 
+    @SuppressWarnings("this-escape")
     public CompoundProcessor(boolean ignoreFailure, List<Processor> processors, List<Processor> onFailureProcessors) {
         this(ignoreFailure, processors, onFailureProcessors, System::nanoTime);
     }
 
+    @SuppressWarnings("this-escape")
     CompoundProcessor(
         boolean ignoreFailure,
         List<Processor> processors,
@@ -53,7 +55,7 @@ public class CompoundProcessor implements Processor {
         this.processors = List.copyOf(processors);
         this.onFailureProcessors = List.copyOf(onFailureProcessors);
         this.relativeTimeProvider = relativeTimeProvider;
-        this.processorsWithMetrics = processors.stream().map(p -> new Tuple<>(p, new IngestMetric())).toList();
+        this.processorsWithMetrics = List.copyOf(processors.stream().map(p -> new Tuple<>(p, new IngestMetric())).toList());
         this.isAsync = flattenProcessors().stream().anyMatch(Processor::isAsync);
     }
 

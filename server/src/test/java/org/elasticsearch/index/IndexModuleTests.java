@@ -23,15 +23,12 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FilterDirectory;
 import org.apache.lucene.tests.index.AssertingDirectoryReader;
 import org.apache.lucene.util.SetOnce.AlreadySetException;
-import org.elasticsearch.Version;
-import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.admin.indices.flush.FlushRequest;
 import org.elasticsearch.action.support.PlainActionFuture;
-import org.elasticsearch.action.support.replication.ReplicationResponse;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.node.DiscoveryNode;
-import org.elasticsearch.cluster.node.DiscoveryNodeRole;
+import org.elasticsearch.cluster.node.DiscoveryNodeUtils;
 import org.elasticsearch.cluster.routing.RecoverySource;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.cluster.routing.ShardRoutingState;
@@ -62,18 +59,15 @@ import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.engine.EngineTestCase;
 import org.elasticsearch.index.engine.InternalEngine;
 import org.elasticsearch.index.engine.InternalEngineFactory;
-import org.elasticsearch.index.engine.SafeCommitInfo;
 import org.elasticsearch.index.fielddata.IndexFieldDataCache;
 import org.elasticsearch.index.mapper.MapperRegistry;
 import org.elasticsearch.index.mapper.ParsedDocument;
 import org.elasticsearch.index.mapper.Uid;
-import org.elasticsearch.index.seqno.ReplicationTracker;
 import org.elasticsearch.index.seqno.RetentionLeaseSyncer;
-import org.elasticsearch.index.seqno.RetentionLeases;
 import org.elasticsearch.index.shard.IndexEventListener;
 import org.elasticsearch.index.shard.IndexShard;
+import org.elasticsearch.index.shard.IndexShardTestCase;
 import org.elasticsearch.index.shard.IndexingOperationListener;
-import org.elasticsearch.index.shard.ReplicationGroup;
 import org.elasticsearch.index.shard.SearchOperationListener;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.index.shard.ShardPath;
@@ -115,16 +109,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BiConsumer;
-import java.util.function.Consumer;
-import java.util.function.LongConsumer;
-import java.util.function.LongSupplier;
-import java.util.function.Supplier;
 
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.singletonMap;
 import static org.elasticsearch.index.IndexService.IndexCreationContext.CREATE_INDEX;
-import static org.elasticsearch.index.seqno.SequenceNumbers.UNASSIGNED_SEQ_NO;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
@@ -175,7 +163,7 @@ public class IndexModuleTests extends ESTestCase {
     public void setUp() throws Exception {
         super.setUp();
         settings = Settings.builder()
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
             .build();
         indicesQueryCache = new IndicesQueryCache(settings);
@@ -244,7 +232,8 @@ public class IndexModuleTests extends ESTestCase {
             Collections.emptyMap(),
             () -> true,
             indexNameExpressionResolver,
-            Collections.emptyMap()
+            Collections.emptyMap(),
+            mock(SlowLogFieldProvider.class)
         );
         module.setReaderWrapper(s -> new Wrapper());
 
@@ -256,7 +245,7 @@ public class IndexModuleTests extends ESTestCase {
 
     public void testRegisterIndexStore() throws IOException {
         final Settings settings = Settings.builder()
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
             .put(IndexModule.INDEX_STORE_TYPE_SETTING.getKey(), "foo_store")
             .build();
@@ -269,7 +258,8 @@ public class IndexModuleTests extends ESTestCase {
             indexStoreFactories,
             () -> true,
             indexNameExpressionResolver,
-            Collections.emptyMap()
+            Collections.emptyMap(),
+            mock(SlowLogFieldProvider.class)
         );
 
         final IndexService indexService = newIndexService(module);
@@ -281,7 +271,7 @@ public class IndexModuleTests extends ESTestCase {
     public void testDirectoryWrapper() throws IOException {
         final Path homeDir = createTempDir();
         final Settings settings = Settings.builder()
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .put(Environment.PATH_HOME_SETTING.getKey(), homeDir.toString())
             .build();
         final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings(index, settings);
@@ -292,7 +282,8 @@ public class IndexModuleTests extends ESTestCase {
             Map.of(),
             () -> true,
             indexNameExpressionResolver,
-            Collections.emptyMap()
+            Collections.emptyMap(),
+            mock(SlowLogFieldProvider.class)
         );
 
         module.setDirectoryWrapper(new TestDirectoryWrapper());
@@ -423,7 +414,7 @@ public class IndexModuleTests extends ESTestCase {
 
     public void testAddSimilarity() throws IOException {
         Settings settings = Settings.builder()
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .put("index.similarity.my_similarity.type", "test_similarity")
             .put("index.similarity.my_similarity.key", "there is a key")
             .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
@@ -460,13 +451,12 @@ public class IndexModuleTests extends ESTestCase {
         assertEquals(msg, expectThrows(IllegalStateException.class, () -> module.forceQueryCacheProvider(null)).getMessage());
         assertEquals(msg, expectThrows(IllegalStateException.class, () -> module.setDirectoryWrapper(null)).getMessage());
         assertEquals(msg, expectThrows(IllegalStateException.class, () -> module.setIndexCommitListener(null)).getMessage());
-        assertEquals(msg, expectThrows(IllegalStateException.class, () -> module.setReplicationTrackerFactory(null)).getMessage());
     }
 
     public void testSetupUnknownSimilarity() {
         Settings settings = Settings.builder()
             .put("index.similarity.my_similarity.type", "test_similarity")
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
             .build();
         final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings("foo", settings);
@@ -479,7 +469,7 @@ public class IndexModuleTests extends ESTestCase {
         Settings settings = Settings.builder()
             .put("index.similarity.my_similarity.foo", "bar")
             .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .build();
         final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings("foo", settings);
         IndexModule module = createIndexModule(indexSettings, emptyAnalysisRegistry, indexNameExpressionResolver);
@@ -490,7 +480,7 @@ public class IndexModuleTests extends ESTestCase {
     public void testForceCustomQueryCache() throws IOException {
         Settings settings = Settings.builder()
             .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .build();
         final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings("foo", settings);
         IndexModule module = createIndexModule(indexSettings, emptyAnalysisRegistry, indexNameExpressionResolver);
@@ -513,7 +503,7 @@ public class IndexModuleTests extends ESTestCase {
     public void testDefaultQueryCacheImplIsSelected() throws IOException {
         Settings settings = Settings.builder()
             .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .build();
         final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings("foo", settings);
         IndexModule module = createIndexModule(indexSettings, emptyAnalysisRegistry, indexNameExpressionResolver);
@@ -526,7 +516,7 @@ public class IndexModuleTests extends ESTestCase {
         Settings settings = Settings.builder()
             .put(IndexModule.INDEX_QUERY_CACHE_ENABLED_SETTING.getKey(), false)
             .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .build();
         final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings("foo", settings);
         IndexModule module = createIndexModule(indexSettings, emptyAnalysisRegistry, indexNameExpressionResolver);
@@ -539,7 +529,7 @@ public class IndexModuleTests extends ESTestCase {
     public void testCustomQueryCacheCleanedUpIfIndexServiceCreationFails() {
         Settings settings = Settings.builder()
             .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .build();
         final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings("foo", settings);
         IndexModule module = createIndexModule(indexSettings, emptyAnalysisRegistry, indexNameExpressionResolver);
@@ -557,7 +547,7 @@ public class IndexModuleTests extends ESTestCase {
     public void testIndexAnalyzersCleanedUpIfIndexServiceCreationFails() {
         Settings settings = Settings.builder()
             .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .build();
         final IndexSettings indexSettings = IndexSettingsModule.newIndexSettings("foo", settings);
 
@@ -624,7 +614,7 @@ public class IndexModuleTests extends ESTestCase {
 
     public void testRegisterCustomRecoveryStateFactory() throws IOException {
         final Settings settings = Settings.builder()
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .put(Environment.PATH_HOME_SETTING.getKey(), createTempDir().toString())
             .put(IndexModule.INDEX_RECOVERY_TYPE_SETTING.getKey(), "test_recovery")
             .build();
@@ -644,7 +634,8 @@ public class IndexModuleTests extends ESTestCase {
             Collections.emptyMap(),
             () -> true,
             indexNameExpressionResolver,
-            recoveryStateFactories
+            recoveryStateFactories,
+            mock(SlowLogFieldProvider.class)
         );
 
         final IndexService indexService = newIndexService(module);
@@ -664,7 +655,8 @@ public class IndexModuleTests extends ESTestCase {
             Collections.emptyMap(),
             () -> true,
             indexNameExpressionResolver,
-            Collections.emptyMap()
+            Collections.emptyMap(),
+            mock(SlowLogFieldProvider.class)
         );
 
         final AtomicLong lastAcquiredPrimaryTerm = new AtomicLong();
@@ -704,25 +696,11 @@ public class IndexModuleTests extends ESTestCase {
             IndexService indexService = newIndexService(module);
             closeables.add(() -> indexService.close("close index service at end of test", false));
 
-            IndexShard indexShard = indexService.createShard(shardRouting, s -> {}, RetentionLeaseSyncer.EMPTY);
+            IndexShard indexShard = indexService.createShard(shardRouting, IndexShardTestCase.NOOP_GCP_SYNCER, RetentionLeaseSyncer.EMPTY);
             closeables.add(() -> indexShard.close("close shard at end of test", true));
-            indexShard.markAsRecovering(
-                "test",
-                new RecoveryState(
-                    shardRouting,
-                    new DiscoveryNode(
-                        "_node_id",
-                        "_node_id",
-                        buildNewFakeTransportAddress(),
-                        Collections.emptyMap(),
-                        DiscoveryNodeRole.roles(),
-                        Version.CURRENT
-                    ),
-                    null
-                )
-            );
+            indexShard.markAsRecovering("test", new RecoveryState(shardRouting, DiscoveryNodeUtils.create("_node_id", "_node_id"), null));
 
-            final PlainActionFuture<Boolean> recoveryFuture = PlainActionFuture.newFuture();
+            final PlainActionFuture<Boolean> recoveryFuture = new PlainActionFuture<>();
             indexShard.recoverFromStore(recoveryFuture);
             recoveryFuture.get();
 
@@ -754,80 +732,6 @@ public class IndexModuleTests extends ESTestCase {
         }
     }
 
-    public void testCustomReplicationTrackerFactory() throws IOException {
-        IndexModule module = new IndexModule(
-            indexSettings,
-            emptyAnalysisRegistry,
-            InternalEngine::new,
-            Collections.emptyMap(),
-            () -> true,
-            indexNameExpressionResolver,
-            Collections.emptyMap()
-        );
-
-        class CustomReplicationTracker extends ReplicationTracker {
-            CustomReplicationTracker(
-                ShardId shardId,
-                String allocationId,
-                IndexSettings indexSettings,
-                long operationPrimaryTerm,
-                long globalCheckpoint,
-                LongConsumer onGlobalCheckpointUpdated,
-                LongSupplier currentTimeMillisSupplier,
-                BiConsumer<RetentionLeases, ActionListener<ReplicationResponse>> onSyncRetentionLeases,
-                Supplier<SafeCommitInfo> safeCommitInfoSupplier,
-                Consumer<ReplicationGroup> onReplicationGroupUpdated
-            ) {
-                super(
-                    shardId,
-                    allocationId,
-                    indexSettings,
-                    operationPrimaryTerm,
-                    globalCheckpoint,
-                    onGlobalCheckpointUpdated,
-                    currentTimeMillisSupplier,
-                    onSyncRetentionLeases,
-                    safeCommitInfoSupplier,
-                    onReplicationGroupUpdated
-                );
-            }
-        }
-        module.setReplicationTrackerFactory(
-            (
-                shardId,
-                allocationId,
-                indexSettings,
-                operationPrimaryTerm,
-                onGlobalCheckpointUpdated,
-                currentTimeMillisSupplier,
-                onSyncRetentionLeases,
-                safeCommitInfoSupplier,
-                onReplicationGroupUpdated) -> new CustomReplicationTracker(
-                    shardId,
-                    allocationId,
-                    indexSettings,
-                    operationPrimaryTerm,
-                    UNASSIGNED_SEQ_NO,
-                    onGlobalCheckpointUpdated,
-                    currentTimeMillisSupplier,
-                    onSyncRetentionLeases,
-                    safeCommitInfoSupplier,
-                    onReplicationGroupUpdated
-                )
-        );
-        final IndexService indexService = newIndexService(module);
-        ShardId shardId = new ShardId("index", UUIDs.randomBase64UUID(random()), 0);
-        ShardRouting shardRouting = ShardRouting.newUnassigned(
-            shardId,
-            true,
-            RecoverySource.EmptyStoreRecoverySource.INSTANCE,
-            new UnassignedInfo(UnassignedInfo.Reason.INDEX_CREATED, null),
-            ShardRouting.Role.DEFAULT
-        ).initialize("_node_id", null, -1);
-        IndexShard indexShard = indexService.createShard(shardRouting, s -> {}, RetentionLeaseSyncer.EMPTY);
-        assertThat(indexShard.getReplicationTracker(), instanceOf(CustomReplicationTracker.class));
-    }
-
     private ShardRouting createInitializedShardRouting() {
         ShardRouting shard = ShardRouting.newUnassigned(
             new ShardId("test", "_na_", 0),
@@ -852,7 +756,8 @@ public class IndexModuleTests extends ESTestCase {
             Collections.emptyMap(),
             () -> true,
             indexNameExpressionResolver,
-            Collections.emptyMap()
+            Collections.emptyMap(),
+            mock(SlowLogFieldProvider.class)
         );
     }
 

@@ -7,7 +7,6 @@
  */
 package org.elasticsearch.datastreams;
 
-import org.elasticsearch.Version;
 import org.elasticsearch.cluster.metadata.DataStream;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.metadata.Metadata;
@@ -20,18 +19,20 @@ import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettingProvider;
 import org.elasticsearch.index.IndexSettings;
+import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.mapper.DateFieldMapper;
 import org.elasticsearch.index.mapper.KeywordFieldMapper;
 import org.elasticsearch.index.mapper.Mapper;
 import org.elasticsearch.index.mapper.MapperBuilderContext;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.MappingParserContext;
+import org.elasticsearch.index.mapper.PassThroughObjectMapper;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 
@@ -83,12 +84,13 @@ public class DataStreamIndexSettingsProvider implements IndexSettingProvider {
             if (indexMode != null) {
                 if (indexMode == IndexMode.TIME_SERIES) {
                     Settings.Builder builder = Settings.builder();
-                    TimeValue lookAheadTime = DataStreamsPlugin.LOOK_AHEAD_TIME.get(allSettings);
+                    TimeValue lookAheadTime = DataStreamsPlugin.getLookAheadTime(allSettings);
+                    TimeValue lookBackTime = DataStreamsPlugin.LOOK_BACK_TIME.get(allSettings);
                     final Instant start;
                     final Instant end;
                     if (dataStream == null || migrating) {
-                        start = resolvedAt.minusMillis(lookAheadTime.getMillis()).truncatedTo(ChronoUnit.SECONDS);
-                        end = resolvedAt.plusMillis(lookAheadTime.getMillis()).truncatedTo(ChronoUnit.SECONDS);
+                        start = DataStream.getCanonicalTimestampBound(resolvedAt.minusMillis(lookBackTime.getMillis()));
+                        end = DataStream.getCanonicalTimestampBound(resolvedAt.plusMillis(lookAheadTime.getMillis()));
                     } else {
                         IndexMetadata currentLatestBackingIndex = metadata.index(dataStream.getWriteIndex());
                         if (currentLatestBackingIndex.getSettings().hasValue(IndexSettings.TIME_SERIES_END_TIME.getKey()) == false) {
@@ -103,9 +105,9 @@ public class DataStreamIndexSettingsProvider implements IndexSettingProvider {
                         }
                         start = IndexSettings.TIME_SERIES_END_TIME.get(currentLatestBackingIndex.getSettings());
                         if (start.isAfter(resolvedAt)) {
-                            end = start.plusMillis(lookAheadTime.getMillis()).truncatedTo(ChronoUnit.SECONDS);
+                            end = DataStream.getCanonicalTimestampBound(start.plusMillis(lookAheadTime.getMillis()));
                         } else {
-                            end = resolvedAt.plusMillis(lookAheadTime.getMillis()).truncatedTo(ChronoUnit.SECONDS);
+                            end = DataStream.getCanonicalTimestampBound(resolvedAt.plusMillis(lookAheadTime.getMillis()));
                         }
                     }
                     assert start.isBefore(end) : "data stream backing index's start time is not before end time";
@@ -146,28 +148,33 @@ public class DataStreamIndexSettingsProvider implements IndexSettingProvider {
         );
         int shardReplicas = allSettings.getAsInt(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0);
         var finalResolvedSettings = Settings.builder()
-            .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT)
+            .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
             .put(allSettings)
             .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, dummyShards)
             .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, shardReplicas)
             .put(IndexMetadata.SETTING_INDEX_UUID, UUIDs.randomBase64UUID())
+            .put(IndexSettings.MODE.getKey(), IndexMode.TIME_SERIES)
             // Avoid failing because index.routing_path is missing
-            .put(IndexSettings.MODE.getKey(), IndexMode.STANDARD)
+            .putList(INDEX_ROUTING_PATH.getKey(), List.of("path"))
             .build();
 
         tmpIndexMetadata.settings(finalResolvedSettings);
         // Create MapperService just to extract keyword dimension fields:
         try (var mapperService = mapperServiceFactory.apply(tmpIndexMetadata.build())) {
-            for (var mapping : combinedTemplateMappings) {
-                mapperService.merge(MapperService.SINGLE_MAPPING_NAME, mapping, MapperService.MergeReason.INDEX_TEMPLATE);
-            }
-
+            mapperService.merge(MapperService.SINGLE_MAPPING_NAME, combinedTemplateMappings, MapperService.MergeReason.INDEX_TEMPLATE);
             List<String> routingPaths = new ArrayList<>();
             for (var fieldMapper : mapperService.documentMapper().mappers().fieldMappers()) {
                 extractPath(routingPaths, fieldMapper);
             }
+            for (var objectMapper : mapperService.documentMapper().mappers().objectMappers().values()) {
+                if (objectMapper instanceof PassThroughObjectMapper passThroughObjectMapper) {
+                    if (passThroughObjectMapper.containsDimensions()) {
+                        routingPaths.add(passThroughObjectMapper.fullPath() + ".*");
+                    }
+                }
+            }
             for (var template : mapperService.getAllDynamicTemplates()) {
-                if (template.pathMatch() == null) {
+                if (template.pathMatch().isEmpty()) {
                     continue;
                 }
 
@@ -179,10 +186,19 @@ public class DataStreamIndexSettingsProvider implements IndexSettingProvider {
                 }
 
                 MappingParserContext parserContext = mapperService.parserContext();
-                var mapper = parserContext.typeParser(mappingSnippetType)
-                    .parse(template.pathMatch(), mappingSnippet, parserContext)
-                    .build(MapperBuilderContext.root(false));
-                extractPath(routingPaths, mapper);
+                for (Iterator<String> iterator = template.pathMatch().iterator(); iterator.hasNext();) {
+                    var mapper = parserContext.typeParser(mappingSnippetType)
+                        .parse(iterator.next(), mappingSnippet, parserContext)
+                        .build(MapperBuilderContext.root(false, false));
+                    extractPath(routingPaths, mapper);
+                    if (iterator.hasNext()) {
+                        // Since FieldMapper.parse modifies the Map passed in (removing entries for "type"), that means
+                        // that only the first pathMatch passed in gets recognized as a time_series_dimension.
+                        // To avoid this, each parsing call uses a new mapping snippet.
+                        // Note that a shallow copy of the mappingSnippet map is not enough if there are multi-fields.
+                        mappingSnippet = template.mappingForName(templateName, KeywordFieldMapper.CONTENT_TYPE);
+                    }
+                }
             }
             return routingPaths;
         } catch (IOException e) {

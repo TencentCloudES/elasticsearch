@@ -8,13 +8,16 @@ teardown:
   - do:
       search_application.delete_behavioral_analytics:
         name: my-test-analytics-collection
-        ignore: 404
 
 
 # Page view event tests #########################################
 ---
 "Post page_view analytics event":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "page_view"
@@ -28,8 +31,12 @@ teardown:
 
 ---
 "Post page_view analytics event - Missing page.url":
+  - skip:
+      features: headers
+
   - do:
       catch: "bad_request"
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "page_view"
@@ -42,7 +49,11 @@ teardown:
 
 ---
 "Post page_view analytics event - With document":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "page_view"
@@ -59,7 +70,11 @@ teardown:
 
 ---
 "Post page_view analytics event - With page title":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "page_view"
@@ -74,7 +89,11 @@ teardown:
 
 ---
 "Post page_view analytics event - With referrer":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "page_view"
@@ -87,10 +106,57 @@ teardown:
             url: "https://www.elastic.co"
             referrer: "http://anotherdomain.com/homepage"
 
+---
+"Post page_view analytics event - debug and session information":
+  - skip:
+      features: headers
+
+  - do:
+      headers:
+        X-Forwarded-For: 192.23.12.12
+        User-Agent: Mozilla/5.0
+        Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ="  # user
+      search_application.post_behavioral_analytics_event:
+        collection_name: my-test-analytics-collection
+        event_type: "page_view"
+        debug: true
+        body:
+          session:
+            id: "123"
+          user:
+            id: "456"
+          page:
+            url: "https://www.elastic.co"
+            title: "Elastic - Homepage"
+            referrer: "http://anotherdomain.com/homepage"
+          document:
+            id: "doc-1"
+            index: "search-index"
+
+  - match: { accepted: true }
+  - match: { event.event.action: "page_view" }
+  - match: { event.data_stream.type: "behavioral_analytics" }
+  - match: { event.data_stream.dataset: "events" }
+  - match: { event.data_stream.namespace: "my-test-analytics-collection" }
+  - match: { event.session.id: "123" }
+  - match: { event.session.user_agent: "Mozilla/5.0" }
+  - match: { event.session.ip: "192.23.12.12" }
+  - match: { event.document.id: "doc-1" }
+  - match: { event.document.index: "search-index" }
+  - match: { event.page.url: "https://www.elastic.co" }
+  - match: { event.page.title: "Elastic - Homepage" }
+  - match: { event.page.referrer: "http://anotherdomain.com/homepage" }
+  - match: { event.user.id: "456" }
+  - gte: { event.@timestamp: 0 }
+
 # Search event tests ############################################
 ---
 "Post search analytics event":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search"
@@ -104,8 +170,12 @@ teardown:
 
 ---
 "Post search analytics event – Missing search query":
+  - skip:
+      features: headers
+
   - do:
       catch: "bad_request"
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search"
@@ -118,7 +188,11 @@ teardown:
 
 ---
 "Post search analytics event - With sort order":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search"
@@ -134,7 +208,11 @@ teardown:
 
 ---
 "Post search analytics event - With sort name and direction":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search"
@@ -151,7 +229,11 @@ teardown:
 
 ---
 "Post search analytics event - With pagination":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search"
@@ -168,7 +250,11 @@ teardown:
 
 ---
 "Post search analytics event - With search application":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search"
@@ -183,7 +269,11 @@ teardown:
 
 ---
 "Post search analytics event - With search results":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search"
@@ -212,7 +302,11 @@ teardown:
 
 ---
 "Post search analytics event - With filters":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search"
@@ -225,13 +319,85 @@ teardown:
             query: "test-query"
             filters:
               brand: "elastic"
-              products: ["elasticsearch", "kibana"]
+              products: [ "elasticsearch", "kibana" ]
               rating: "[3-5]"
+
+---
+"Post search analytics event - debug and session information":
+  - skip:
+      features: headers
+
+  - do:
+      headers:
+        X-Forwarded-For: 192.23.12.12
+        User-Agent: Mozilla/5.0
+        Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ="  # user
+      search_application.post_behavioral_analytics_event:
+        collection_name: my-test-analytics-collection
+        event_type: "search"
+        debug: true
+        body:
+          session:
+            id: "123"
+          user:
+            id: "456"
+          search:
+            query: "test-query"
+            search_application: "my-search-application"
+            sort:
+              name: "price"
+              direction: "desc"
+            filters:
+              brand: "elastic"
+              products: [ "elasticsearch", "kibana" ]
+              rating: "[3-5]"
+            page:
+              current: 1
+              size: 10
+            results:
+              total_results: 150
+              items:
+                - document:
+                    id: doc-1
+                - document:
+                    id: doc-2
+                    index: my-search-index
+                - page:
+                    url: "https://www.elastic.co"
+                - page:
+                    url: "https://www.elastic.co/doc/getting-stared"
+                  document:
+                    id: "getting-started"
+                    index: elastic-documentation-en
+
+  - match: { accepted: true }
+  - match: { event.event.action: "search" }
+  - match: { event.data_stream.type: "behavioral_analytics" }
+  - match: { event.data_stream.dataset: "events" }
+  - match: { event.data_stream.namespace: "my-test-analytics-collection" }
+  - match: { event.session.id: "123" }
+  - match: { event.session.user_agent: "Mozilla/5.0" }
+  - match: { event.session.ip: "192.23.12.12" }
+  - match: { event.search.query: "test-query" }
+  - match: { event.search.search_application: "my-search-application" }
+  - match: { event.search.sort.name: "price" }
+  - match: { event.search.sort.direction: "desc" }
+  - match: { event.search.filters.brand: [ "elastic" ] }
+  - match: { event.search.filters.products: [ "elasticsearch", "kibana" ] }
+  - match: { event.search.filters.rating: [ "[3-5]" ] }
+  - match: { event.search.page.current: 1 }
+  - match: { event.search.page.size: 10 }
+  - match: { event.search.results.total_results: 150 }
+  - gte: { event.@timestamp: 0 }
 
 # Search click event tests #######################################
 ---
 "Post search_click analytics event":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search_click"
@@ -248,8 +414,52 @@ teardown:
             query: "test-query"
 
 ---
-"Post search_click analytics event - Page Only":
+"Post search_click analytics event - debug and session information":
+  - skip:
+      features: headers
+
   - do:
+      headers:
+        X-Forwarded-For: 192.23.12.12
+        User-Agent: Mozilla/5.0
+        Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ="  # user
+      search_application.post_behavioral_analytics_event:
+        collection_name: my-test-analytics-collection
+        event_type: "search_click"
+        debug: true
+        body:
+          session:
+            id: "123"
+          user:
+            id: "456"
+          document:
+            id: "doc-1"
+          page:
+            url: "https://www.elastic.co"
+          search:
+            query: "test-query"
+
+  - match: { accepted: true }
+  - match: { event.event.action: "search_click" }
+  - match: { event.data_stream.type: "behavioral_analytics" }
+  - match: { event.data_stream.dataset: "events" }
+  - match: { event.data_stream.namespace: "my-test-analytics-collection" }
+  - match: { event.session.id: "123" }
+  - match: { event.session.user_agent: "Mozilla/5.0" }
+  - match: { event.session.ip: "192.23.12.12" }
+  - match: { event.document.id: "doc-1" }
+  - match: { event.page.url: "https://www.elastic.co" }
+  - match: { event.user.id: "456" }
+  - match: { event.search.query: "test-query" }
+  - gte: { event.@timestamp: 0 }
+
+---
+"Post search_click analytics event - Page Only":
+  - skip:
+      features: headers
+
+  - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search_click"
@@ -265,7 +475,11 @@ teardown:
 
 ---
 "Post search_click analytics event - Document Only":
+  - skip:
+      features: headers
+
   - do:
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search_click"
@@ -282,8 +496,12 @@ teardown:
 
 ---
 "Post search_click analytics event – Missing search query":
+  - skip:
+      features: headers
+
   - do:
       catch: "bad_request"
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search_click"
@@ -298,8 +516,12 @@ teardown:
 
 ---
 "Post search_click analytics event – Missing page url and document":
+  - skip:
+      features: headers
+
   - do:
       catch: "bad_request"
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "search_click"
@@ -315,8 +537,12 @@ teardown:
 # Generic errors tests ###############################################
 ---
 "Post analytics event - Analytics collection does not exist":
+  - skip:
+      features: headers
+
   - do:
       catch: "missing"
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: test-nonexistent-analytics-collection
         event_type: "page_view"
@@ -330,8 +556,12 @@ teardown:
 
 ---
 "Post analytics event - Event type does not exist":
+  - skip:
+      features: headers
+
   - do:
       catch: "bad_request"
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "nonexistent-event-type"
@@ -347,8 +577,12 @@ teardown:
 
 ---
 "Post page_view analytics event - Missing session.id":
+  - skip:
+      features: headers
+
   - do:
       catch: "bad_request"
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "page_view"
@@ -361,8 +595,12 @@ teardown:
 
 ---
 "Post page_view analytics event - Missing user.id":
+  - skip:
+      features: headers
+
   - do:
       catch: "bad_request"
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "page_view"
@@ -375,8 +613,12 @@ teardown:
 
 ---
 "Post analytics event - Unknown event field":
+  - skip:
+      features: headers
+
   - do:
       catch: "bad_request"
+      headers: { Authorization: "Basic ZW50c2VhcmNoLXVzZXI6ZW50c2VhcmNoLXVzZXItcGFzc3dvcmQ=" }  # user
       search_application.post_behavioral_analytics_event:
         collection_name: my-test-analytics-collection
         event_type: "nonexistent-event-type"

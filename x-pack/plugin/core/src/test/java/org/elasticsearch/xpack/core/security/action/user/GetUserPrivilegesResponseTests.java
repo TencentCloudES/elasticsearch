@@ -8,6 +8,7 @@
 package org.elasticsearch.xpack.core.security.action.user;
 
 import org.elasticsearch.TransportVersion;
+import org.elasticsearch.TransportVersions;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.ByteBufferStreamInput;
@@ -21,7 +22,6 @@ import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.test.EqualsHashCodeTestUtils;
 import org.elasticsearch.test.TransportVersionUtils;
 import org.elasticsearch.xpack.core.XPackClientPlugin;
-import org.elasticsearch.xpack.core.security.authz.RoleDescriptor;
 import org.elasticsearch.xpack.core.security.authz.RoleDescriptor.ApplicationResourcePrivileges;
 import org.elasticsearch.xpack.core.security.authz.permission.FieldPermissionsDefinition.FieldGrantExcludeGroup;
 import org.elasticsearch.xpack.core.security.authz.privilege.ConfigurableClusterPrivilege;
@@ -66,7 +66,7 @@ public class GetUserPrivilegesResponseTests extends ESTestCase {
 
     public void testSerializationForCurrentVersion() throws Exception {
         final TransportVersion version = TransportVersionUtils.randomCompatibleVersion(random());
-        final boolean canIncludeRemoteIndices = version.onOrAfter(RoleDescriptor.TRANSPORT_VERSION_REMOTE_INDICES);
+        final boolean canIncludeRemoteIndices = version.onOrAfter(TransportVersions.V_8_8_0);
 
         final GetUserPrivilegesResponse original = randomResponse(canIncludeRemoteIndices);
 
@@ -83,13 +83,13 @@ public class GetUserPrivilegesResponseTests extends ESTestCase {
 
     public void testSerializationWithRemoteIndicesThrowsOnUnsupportedVersions() throws IOException {
         final BytesStreamOutput out = new BytesStreamOutput();
-        final TransportVersion versionBeforeRemoteIndices = TransportVersionUtils.getPreviousVersion(
-            RoleDescriptor.TRANSPORT_VERSION_REMOTE_INDICES
+        final TransportVersion versionBeforeAdvancedRemoteClusterSecurity = TransportVersionUtils.getPreviousVersion(
+            TransportVersions.V_8_8_0
         );
         final TransportVersion version = TransportVersionUtils.randomVersionBetween(
             random(),
-            TransportVersion.V_7_17_0,
-            versionBeforeRemoteIndices
+            TransportVersions.V_7_17_0,
+            versionBeforeAdvancedRemoteClusterSecurity
         );
         out.setTransportVersion(version);
 
@@ -99,7 +99,9 @@ public class GetUserPrivilegesResponseTests extends ESTestCase {
             assertThat(
                 ex.getMessage(),
                 containsString(
-                    "versions of Elasticsearch before [8060099] can't handle remote indices privileges and attempted to send to ["
+                    "versions of Elasticsearch before ["
+                        + TransportVersions.V_8_8_0
+                        + "] can't handle remote indices privileges and attempted to send to ["
                         + version
                         + "]"
                 )

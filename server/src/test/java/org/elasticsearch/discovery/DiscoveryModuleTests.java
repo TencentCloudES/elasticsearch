@@ -8,21 +8,24 @@
 package org.elasticsearch.discovery;
 
 import org.elasticsearch.TransportVersion;
-import org.elasticsearch.Version;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.coordination.Coordinator;
+import org.elasticsearch.cluster.coordination.LeaderHeartbeatService;
 import org.elasticsearch.cluster.coordination.PreVoteCollector;
 import org.elasticsearch.cluster.coordination.Reconfigurator;
 import org.elasticsearch.cluster.coordination.StatefulPreVoteCollector;
 import org.elasticsearch.cluster.node.DiscoveryNode;
+import org.elasticsearch.cluster.node.VersionInformation;
 import org.elasticsearch.cluster.routing.RerouteService;
 import org.elasticsearch.cluster.service.ClusterApplier;
 import org.elasticsearch.cluster.service.MasterService;
+import org.elasticsearch.cluster.version.CompatibilityVersionsUtils;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.IOUtils;
+import org.elasticsearch.features.FeatureService;
 import org.elasticsearch.gateway.GatewayMetaState;
 import org.elasticsearch.indices.breaker.NoneCircuitBreakerService;
 import org.elasticsearch.plugins.ClusterCoordinationPlugin;
@@ -74,8 +77,8 @@ public class DiscoveryModuleTests extends ESTestCase {
     public void setupDummyServices() {
         transportService = MockTransportService.createNewService(
             Settings.EMPTY,
-            Version.CURRENT,
-            TransportVersion.CURRENT,
+            VersionInformation.CURRENT,
+            TransportVersion.current(),
             mock(ThreadPool.class),
             null
         );
@@ -112,7 +115,9 @@ public class DiscoveryModuleTests extends ESTestCase {
             gatewayMetaState,
             mock(RerouteService.class),
             null,
-            new NoneCircuitBreakerService()
+            new NoneCircuitBreakerService(),
+            CompatibilityVersionsUtils.staticCurrent(),
+            new FeatureService(List.of())
         );
     }
 
@@ -281,9 +286,48 @@ public class DiscoveryModuleTests extends ESTestCase {
         );
     }
 
+    public void testRejectsMultipleLeaderHeartbeatServices() {
+        assertThat(
+            expectThrows(
+                IllegalStateException.class,
+                () -> DiscoveryModule.getLeaderHeartbeatService(
+                    Settings.EMPTY,
+                    List.of(new BaseTestClusterCoordinationPlugin(), new TestClusterCoordinationPlugin1() {
+                        @Override
+                        public Optional<ReconfiguratorFactory> getReconfiguratorFactory() {
+                            return Optional.empty();
+                        }
+
+                        @Override
+                        public Optional<PreVoteCollector.Factory> getPreVoteCollectorFactory() {
+                            return Optional.empty();
+                        }
+                    }, new TestClusterCoordinationPlugin2() {
+                        @Override
+                        public Optional<ReconfiguratorFactory> getReconfiguratorFactory() {
+                            return Optional.empty();
+                        }
+
+                        @Override
+                        public Optional<PreVoteCollector.Factory> getPreVoteCollectorFactory() {
+                            return Optional.empty();
+                        }
+                    })
+                )
+            ).getMessage(),
+            containsString("multiple leader heart beat service factories found")
+        );
+
+        assertThat(
+            DiscoveryModule.getLeaderHeartbeatService(Settings.EMPTY, List.of(new BaseTestClusterCoordinationPlugin())),
+            is(BaseTestClusterCoordinationPlugin.leaderHeartbeatServiceInstance)
+        );
+    }
+
     private static class BaseTestClusterCoordinationPlugin extends Plugin implements ClusterCoordinationPlugin {
         static Reconfigurator reconfiguratorInstance;
         static PreVoteCollector.Factory preVoteCollectorFactory = StatefulPreVoteCollector::new;
+        static LeaderHeartbeatService leaderHeartbeatServiceInstance = LeaderHeartbeatService.NO_OP;
 
         @Override
         public Optional<ReconfiguratorFactory> getReconfiguratorFactory() {
@@ -293,6 +337,11 @@ public class DiscoveryModuleTests extends ESTestCase {
         @Override
         public Optional<PreVoteCollector.Factory> getPreVoteCollectorFactory() {
             return Optional.of(preVoteCollectorFactory);
+        }
+
+        @Override
+        public Optional<LeaderHeartbeatService> getLeaderHeartbeatService(Settings settings) {
+            return Optional.of(leaderHeartbeatServiceInstance);
         }
     }
 

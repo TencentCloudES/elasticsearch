@@ -22,6 +22,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.Objects;
 
 /**
  * A @link {@link StreamOutput} that uses {@link Recycler.V<BytesRef>} to acquire pages of bytes, which
@@ -42,9 +43,7 @@ public class RecyclerBytesStreamOutput extends BytesStream implements Releasable
 
     public RecyclerBytesStreamOutput(Recycler<BytesRef> recycler) {
         this.recycler = recycler;
-        try (Recycler.V<BytesRef> obtain = recycler.obtain()) {
-            pageSize = obtain.v().length;
-        }
+        this.pageSize = recycler.pageSize();
         this.currentPageOffset = pageSize;
     }
 
@@ -68,10 +67,7 @@ public class RecyclerBytesStreamOutput extends BytesStream implements Releasable
             return;
         }
 
-        // illegal args: offset and/or length exceed array size
-        if (b.length < (offset + length)) {
-            throw new IllegalArgumentException("Illegal offset " + offset + "/length " + length + " for byte[] of length " + b.length);
-        }
+        Objects.checkFromIndexSize(offset, length, b.length);
 
         // get enough pages for new size
         ensureCapacity(length);

@@ -8,11 +8,11 @@
 package org.elasticsearch.cluster.metadata;
 
 import org.apache.lucene.tests.util.LuceneTestCase;
-import org.elasticsearch.Version;
 import org.elasticsearch.action.admin.indices.rollover.MaxAgeCondition;
 import org.elasticsearch.action.admin.indices.rollover.RolloverConfiguration;
 import org.elasticsearch.action.admin.indices.rollover.RolloverConfigurationTests;
 import org.elasticsearch.action.admin.indices.rollover.RolloverInfo;
+import org.elasticsearch.action.downsample.DownsampleConfig;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.UUIDs;
@@ -24,7 +24,9 @@ import org.elasticsearch.core.Tuple;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexMode;
 import org.elasticsearch.index.IndexSettings;
+import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.mapper.DateFieldMapper;
+import org.elasticsearch.search.aggregations.bucket.histogram.DateHistogramInterval;
 import org.elasticsearch.test.AbstractXContentSerializingTestCase;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.xcontent.ToXContent;
@@ -37,16 +39,21 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 
 import static org.elasticsearch.cluster.metadata.DataStream.getDefaultBackingIndexName;
 import static org.elasticsearch.cluster.metadata.DataStreamTestHelper.newInstance;
+import static org.elasticsearch.cluster.metadata.DataStreamTestHelper.randomGlobalRetention;
 import static org.elasticsearch.cluster.metadata.DataStreamTestHelper.randomIndexInstances;
+import static org.elasticsearch.cluster.metadata.DataStreamTestHelper.randomNonEmptyIndexInstances;
+import static org.elasticsearch.index.IndexSettings.LIFECYCLE_ORIGINATION_DATE;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
@@ -87,9 +94,12 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         var allowsCustomRouting = instance.isAllowCustomRouting();
         var indexMode = instance.getIndexMode();
         var lifecycle = instance.getLifecycle();
-        switch (between(0, 9)) {
+        var failureStore = instance.isFailureStore();
+        var failureIndices = instance.getFailureIndices();
+        var autoShardingEvent = instance.getAutoShardingEvent();
+        switch (between(0, 11)) {
             case 0 -> name = randomAlphaOfLength(10);
-            case 1 -> indices = randomValueOtherThan(List.of(), DataStreamTestHelper::randomIndexInstances);
+            case 1 -> indices = randomNonEmptyIndexInstances();
             case 2 -> generation = instance.getGeneration() + randomIntBetween(1, 10);
             case 3 -> metadata = randomBoolean() && metadata != null ? null : Map.of("key", randomAlphaOfLength(10));
             case 4 -> {
@@ -113,7 +123,22 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
             case 8 -> indexMode = randomBoolean() && indexMode != null
                 ? null
                 : randomValueOtherThan(indexMode, () -> randomFrom(IndexMode.values()));
-            case 9 -> lifecycle = randomBoolean() && lifecycle != null ? null : new DataLifecycle(randomMillisUpToYear9999());
+            case 9 -> lifecycle = randomBoolean() && lifecycle != null
+                ? null
+                : DataStreamLifecycle.newBuilder().dataRetention(randomMillisUpToYear9999()).build();
+            case 10 -> {
+                failureIndices = randomValueOtherThan(failureIndices, DataStreamTestHelper::randomIndexInstances);
+                failureStore = failureIndices.isEmpty() == false;
+            }
+            case 11 -> {
+                autoShardingEvent = randomBoolean() && autoShardingEvent != null
+                    ? null
+                    : new DataStreamAutoShardingEvent(
+                        indices.get(indices.size() - 1).getName(),
+                        randomIntBetween(1, 10),
+                        randomMillisUpToYear9999()
+                    );
+            }
         }
 
         return new DataStream(
@@ -126,16 +151,18 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
             isSystem,
             allowsCustomRouting,
             indexMode,
-            lifecycle
+            lifecycle,
+            failureStore,
+            failureIndices,
+            autoShardingEvent
         );
     }
 
     public void testRollover() {
         DataStream ds = DataStreamTestHelper.randomInstance().promoteDataStream();
         Tuple<String, Long> newCoordinates = ds.nextWriteIndexAndGeneration(Metadata.EMPTY_METADATA);
-        final DataStream rolledDs = ds.rollover(new Index(newCoordinates.v1(), UUIDs.randomBase64UUID()), newCoordinates.v2(), false);
+        final DataStream rolledDs = ds.rollover(new Index(newCoordinates.v1(), UUIDs.randomBase64UUID()), newCoordinates.v2(), false, null);
         assertThat(rolledDs.getName(), equalTo(ds.getName()));
-        assertThat(rolledDs.getTimeStampField(), equalTo(ds.getTimeStampField()));
         assertThat(rolledDs.getGeneration(), equalTo(ds.getGeneration() + 1));
         assertThat(rolledDs.getIndices().size(), equalTo(ds.getIndices().size() + 1));
         assertTrue(rolledDs.getIndices().containsAll(ds.getIndices()));
@@ -151,7 +178,7 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         Metadata.Builder builder = Metadata.builder();
         for (int k = 1; k <= numConflictingIndices; k++) {
             IndexMetadata im = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(ds.getName(), ds.getGeneration() + k, 0L))
-                .settings(settings(Version.CURRENT))
+                .settings(settings(IndexVersion.current()))
                 .numberOfShards(1)
                 .numberOfReplicas(1)
                 .build();
@@ -159,9 +186,8 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         }
 
         final Tuple<String, Long> newCoordinates = ds.nextWriteIndexAndGeneration(builder.build());
-        final DataStream rolledDs = ds.rollover(new Index(newCoordinates.v1(), UUIDs.randomBase64UUID()), newCoordinates.v2(), false);
+        final DataStream rolledDs = ds.rollover(new Index(newCoordinates.v1(), UUIDs.randomBase64UUID()), newCoordinates.v2(), false, null);
         assertThat(rolledDs.getName(), equalTo(ds.getName()));
-        assertThat(rolledDs.getTimeStampField(), equalTo(ds.getTimeStampField()));
         assertThat(rolledDs.getGeneration(), equalTo(ds.getGeneration() + numConflictingIndices + 1));
         assertThat(rolledDs.getIndices().size(), equalTo(ds.getIndices().size() + 1));
         assertTrue(rolledDs.getIndices().containsAll(ds.getIndices()));
@@ -183,13 +209,15 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
             ds.isSystem(),
             ds.isAllowCustomRouting(),
             indexMode,
-            ds.getLifecycle()
+            ds.getLifecycle(),
+            ds.isFailureStore(),
+            ds.getFailureIndices(),
+            ds.getAutoShardingEvent()
         );
         var newCoordinates = ds.nextWriteIndexAndGeneration(Metadata.EMPTY_METADATA);
 
-        var rolledDs = ds.rollover(new Index(newCoordinates.v1(), UUIDs.randomBase64UUID()), newCoordinates.v2(), true);
+        var rolledDs = ds.rollover(new Index(newCoordinates.v1(), UUIDs.randomBase64UUID()), newCoordinates.v2(), true, null);
         assertThat(rolledDs.getName(), equalTo(ds.getName()));
-        assertThat(rolledDs.getTimeStampField(), equalTo(ds.getTimeStampField()));
         assertThat(rolledDs.getGeneration(), equalTo(ds.getGeneration() + 1));
         assertThat(rolledDs.getIndices().size(), equalTo(ds.getIndices().size() + 1));
         assertTrue(rolledDs.getIndices().containsAll(ds.getIndices()));
@@ -209,13 +237,15 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
             ds.isSystem(),
             ds.isAllowCustomRouting(),
             IndexMode.TIME_SERIES,
-            ds.getLifecycle()
+            ds.getLifecycle(),
+            ds.isFailureStore(),
+            ds.getFailureIndices(),
+            ds.getAutoShardingEvent()
         );
         var newCoordinates = ds.nextWriteIndexAndGeneration(Metadata.EMPTY_METADATA);
 
-        var rolledDs = ds.rollover(new Index(newCoordinates.v1(), UUIDs.randomBase64UUID()), newCoordinates.v2(), false);
+        var rolledDs = ds.rollover(new Index(newCoordinates.v1(), UUIDs.randomBase64UUID()), newCoordinates.v2(), false, null);
         assertThat(rolledDs.getName(), equalTo(ds.getName()));
-        assertThat(rolledDs.getTimeStampField(), equalTo(ds.getTimeStampField()));
         assertThat(rolledDs.getGeneration(), equalTo(ds.getGeneration() + 1));
         assertThat(rolledDs.getIndices().size(), equalTo(ds.getIndices().size() + 1));
         assertTrue(rolledDs.getIndices().containsAll(ds.getIndices()));
@@ -236,7 +266,6 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         DataStream updated = original.removeBackingIndex(indices.get(indexToRemove - 1));
         assertThat(updated.getName(), equalTo(original.getName()));
         assertThat(updated.getGeneration(), equalTo(original.getGeneration() + 1));
-        assertThat(updated.getTimeStampField(), equalTo(original.getTimeStampField()));
         assertThat(updated.getIndices().size(), equalTo(numBackingIndices - 1));
         for (int k = 0; k < (numBackingIndices - 1); k++) {
             assertThat(updated.getIndices().get(k), equalTo(original.getIndices().get(k < (indexToRemove - 1) ? k : k + 1)));
@@ -302,7 +331,7 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         Metadata.Builder builder = Metadata.builder();
         for (int k = 1; k <= numBackingIndices; k++) {
             IndexMetadata im = IndexMetadata.builder(indices.get(k - 1).getName())
-                .settings(settings(Version.CURRENT))
+                .settings(settings(IndexVersion.current()))
                 .numberOfShards(1)
                 .numberOfReplicas(1)
                 .build();
@@ -312,14 +341,17 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         builder.put(original);
         Index indexToAdd = new Index(randomAlphaOfLength(4), UUIDs.randomBase64UUID(random()));
         builder.put(
-            IndexMetadata.builder(indexToAdd.getName()).settings(settings(Version.CURRENT)).numberOfShards(1).numberOfReplicas(1).build(),
+            IndexMetadata.builder(indexToAdd.getName())
+                .settings(settings(IndexVersion.current()))
+                .numberOfShards(1)
+                .numberOfReplicas(1)
+                .build(),
             false
         );
 
         DataStream updated = original.addBackingIndex(builder.build(), indexToAdd);
         assertThat(updated.getName(), equalTo(original.getName()));
         assertThat(updated.getGeneration(), equalTo(original.getGeneration() + 1));
-        assertThat(updated.getTimeStampField(), equalTo(original.getTimeStampField()));
         assertThat(updated.getIndices().size(), equalTo(numBackingIndices + 1));
         for (int k = 1; k <= numBackingIndices; k++) {
             assertThat(updated.getIndices().get(k), equalTo(original.getIndices().get(k - 1)));
@@ -344,13 +376,13 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         Metadata.Builder builder = Metadata.builder();
         for (int k = 1; k <= numBackingIndices; k++) {
             IndexMetadata im = IndexMetadata.builder(indices1.get(k - 1).getName())
-                .settings(settings(Version.CURRENT))
+                .settings(settings(IndexVersion.current()))
                 .numberOfShards(1)
                 .numberOfReplicas(1)
                 .build();
             builder.put(im, false);
             im = IndexMetadata.builder(indices2.get(k - 1).getName())
-                .settings(settings(Version.CURRENT))
+                .settings(settings(IndexVersion.current()))
                 .numberOfShards(1)
                 .numberOfReplicas(1)
                 .build();
@@ -391,7 +423,7 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         Metadata.Builder builder = Metadata.builder();
         for (int k = 1; k <= numBackingIndices; k++) {
             IndexMetadata im = IndexMetadata.builder(indices.get(k - 1).getName())
-                .settings(settings(Version.CURRENT))
+                .settings(settings(IndexVersion.current()))
                 .numberOfShards(1)
                 .numberOfReplicas(1)
                 .build();
@@ -404,7 +436,6 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         DataStream updated = original.addBackingIndex(builder.build(), indexToAdd);
         assertThat(updated.getName(), equalTo(original.getName()));
         assertThat(updated.getGeneration(), equalTo(original.getGeneration()));
-        assertThat(updated.getTimeStampField(), equalTo(original.getTimeStampField()));
         assertThat(updated.getIndices().size(), equalTo(numBackingIndices));
         for (int k = 0; k < numBackingIndices; k++) {
             assertThat(updated.getIndices().get(k), equalTo(original.getIndices().get(k)));
@@ -424,7 +455,7 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         Metadata.Builder builder = Metadata.builder();
         for (int k = 1; k <= numBackingIndices; k++) {
             IndexMetadata im = IndexMetadata.builder(indices.get(k - 1).getName())
-                .settings(settings(Version.CURRENT))
+                .settings(settings(IndexVersion.current()))
                 .numberOfShards(1)
                 .numberOfReplicas(1)
                 .build();
@@ -435,7 +466,7 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
 
         Index indexToAdd = new Index(randomAlphaOfLength(4), UUIDs.randomBase64UUID(random()));
         IndexMetadata.Builder b = IndexMetadata.builder(indexToAdd.getName())
-            .settings(settings(Version.CURRENT))
+            .settings(settings(IndexVersion.current()))
             .numberOfShards(1)
             .numberOfReplicas(1);
         final int numAliases = randomIntBetween(1, 3);
@@ -492,7 +523,6 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         DataStream updated = original.replaceBackingIndex(indices.get(indexToReplace), newBackingIndex);
         assertThat(updated.getName(), equalTo(original.getName()));
         assertThat(updated.getGeneration(), equalTo(original.getGeneration() + 1));
-        assertThat(updated.getTimeStampField(), equalTo(original.getTimeStampField()));
         assertThat(updated.getIndices().size(), equalTo(numBackingIndices));
         assertThat(updated.getIndices().get(indexToReplace), equalTo(newBackingIndex));
 
@@ -570,7 +600,10 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
             preSnapshotDataStream.isSystem(),
             preSnapshotDataStream.isAllowCustomRouting(),
             preSnapshotDataStream.getIndexMode(),
-            preSnapshotDataStream.getLifecycle()
+            preSnapshotDataStream.getLifecycle(),
+            preSnapshotDataStream.isFailureStore(),
+            preSnapshotDataStream.getFailureIndices(),
+            preSnapshotDataStream.getAutoShardingEvent()
         );
 
         var reconciledDataStream = postSnapshotDataStream.snapshot(
@@ -578,7 +611,6 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         );
 
         assertThat(reconciledDataStream.getName(), equalTo(postSnapshotDataStream.getName()));
-        assertThat(reconciledDataStream.getTimeStampField(), equalTo(postSnapshotDataStream.getTimeStampField()));
         assertThat(reconciledDataStream.getGeneration(), equalTo(postSnapshotDataStream.getGeneration()));
         if (reconciledDataStream.getMetadata() != null) {
             assertThat(
@@ -597,11 +629,7 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
 
     public void testSnapshotWithAllBackingIndicesRemoved() {
         var preSnapshotDataStream = DataStreamTestHelper.randomInstance();
-        var indicesToAdd = new ArrayList<Index>();
-        while (indicesToAdd.isEmpty()) {
-            // ensure at least one index
-            indicesToAdd.addAll(randomIndexInstances());
-        }
+        var indicesToAdd = randomNonEmptyIndexInstances();
 
         var postSnapshotDataStream = new DataStream(
             preSnapshotDataStream.getName(),
@@ -613,7 +641,10 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
             preSnapshotDataStream.isSystem(),
             preSnapshotDataStream.isAllowCustomRouting(),
             preSnapshotDataStream.getIndexMode(),
-            preSnapshotDataStream.getLifecycle()
+            preSnapshotDataStream.getLifecycle(),
+            preSnapshotDataStream.isFailureStore(),
+            preSnapshotDataStream.getFailureIndices(),
+            preSnapshotDataStream.getAutoShardingEvent()
         );
 
         assertNull(postSnapshotDataStream.snapshot(preSnapshotDataStream.getIndices().stream().map(Index::getName).toList()));
@@ -768,7 +799,7 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
                             Settings.builder()
                                 .put(IndexMetadata.INDEX_NUMBER_OF_SHARDS_SETTING.getKey(), 1)
                                 .put(IndexMetadata.INDEX_NUMBER_OF_REPLICAS_SETTING.getKey(), 1)
-                                .put(IndexMetadata.SETTING_INDEX_VERSION_CREATED.getKey(), Version.CURRENT)
+                                .put(IndexMetadata.SETTING_INDEX_VERSION_CREATED.getKey(), IndexVersion.current())
                                 .build()
                         )
                         .build()
@@ -787,7 +818,7 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
                                 Settings.builder()
                                     .put(IndexMetadata.INDEX_NUMBER_OF_SHARDS_SETTING.getKey(), 1)
                                     .put(IndexMetadata.INDEX_NUMBER_OF_REPLICAS_SETTING.getKey(), 1)
-                                    .put(IndexMetadata.SETTING_INDEX_VERSION_CREATED.getKey(), Version.CURRENT)
+                                    .put(IndexMetadata.SETTING_INDEX_VERSION_CREATED.getKey(), IndexVersion.current())
                                     .put(IndexSettings.MODE.getKey(), IndexMode.TIME_SERIES)
                                     .put(IndexSettings.TIME_SERIES_START_TIME.getKey(), start3.toEpochMilli())
                                     .put(IndexSettings.TIME_SERIES_END_TIME.getKey(), end3.toEpochMilli())
@@ -819,49 +850,203 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         }
     }
 
-    public void testGetCreationOrRolloverDate() {
+    public void testGetGenerationLifecycleDate() {
         String dataStreamName = "metrics-foo";
         long now = System.currentTimeMillis();
         long creationTimeMillis = now - 3000L;
         long rolloverTimeMills = now - 2000L;
 
         {
-            // for non rolled indices we get the index creation date
+            // for the write index we get the null
             IndexMetadata.Builder indexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 1))
-                .settings(settings(Version.CURRENT))
+                .settings(settings(IndexVersion.current()))
                 .numberOfShards(1)
                 .numberOfReplicas(1)
                 .creationDate(creationTimeMillis);
-
-            assertThat(DataStream.getCreationOrRolloverDate(dataStreamName, indexMetaBuilder.build()).millis(), is(creationTimeMillis));
+            IndexMetadata indexMetadata = indexMetaBuilder.build();
+            DataStream dataStream = new DataStream(
+                dataStreamName,
+                List.of(indexMetadata.getIndex()),
+                1L,
+                Map.of(),
+                false,
+                randomBoolean(),
+                false,
+                randomBoolean(),
+                IndexMode.STANDARD
+            );
+            assertNull(dataStream.getGenerationLifecycleDate(indexMetadata));
         }
 
         {
             // for rolled indices we get the rollover info for the specified data stream
+            IndexMetadata.Builder writeIndexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 2))
+                .settings(settings(IndexVersion.current()))
+                .numberOfShards(1)
+                .numberOfReplicas(1)
+                .creationDate(now - 3000L);
             IndexMetadata.Builder indexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 1))
-                .settings(settings(Version.CURRENT))
+                .settings(settings(IndexVersion.current()))
                 .numberOfShards(1)
                 .numberOfReplicas(1)
                 .creationDate(now - 3000L);
 
             MaxAgeCondition rolloverCondition = new MaxAgeCondition(TimeValue.timeValueMillis(rolloverTimeMills));
             indexMetaBuilder.putRolloverInfo(new RolloverInfo(dataStreamName, List.of(rolloverCondition), now - 2000L));
-
-            assertThat(DataStream.getCreationOrRolloverDate(dataStreamName, indexMetaBuilder.build()).millis(), is(rolloverTimeMills));
+            IndexMetadata indexMetadata = indexMetaBuilder.build();
+            DataStream dataStream = new DataStream(
+                dataStreamName,
+                List.of(indexMetadata.getIndex(), writeIndexMetaBuilder.build().getIndex()),
+                1L,
+                Map.of(),
+                false,
+                randomBoolean(),
+                false,
+                randomBoolean(),
+                IndexMode.STANDARD
+            );
+            assertThat(dataStream.getGenerationLifecycleDate(indexMetadata).millis(), is(rolloverTimeMills));
         }
 
         {
             // for rolled indices on other targets than the data stream name we get the creation date
+            IndexMetadata.Builder writeIndexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 2))
+                .settings(settings(IndexVersion.current()))
+                .numberOfShards(1)
+                .numberOfReplicas(1)
+                .creationDate(now - 3000L);
             IndexMetadata.Builder indexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 1))
-                .settings(settings(Version.CURRENT))
+                .settings(settings(IndexVersion.current()))
                 .numberOfShards(1)
                 .numberOfReplicas(1)
                 .creationDate(creationTimeMillis);
 
             MaxAgeCondition rolloverCondition = new MaxAgeCondition(TimeValue.timeValueMillis(rolloverTimeMills));
             indexMetaBuilder.putRolloverInfo(new RolloverInfo("some-alias-name", List.of(rolloverCondition), now - 2000L));
+            IndexMetadata indexMetadata = indexMetaBuilder.build();
+            DataStream dataStream = new DataStream(
+                dataStreamName,
+                List.of(indexMetadata.getIndex(), writeIndexMetaBuilder.build().getIndex()),
+                1L,
+                Map.of(),
+                false,
+                randomBoolean(),
+                false,
+                randomBoolean(),
+                IndexMode.STANDARD
+            );
+            assertThat(dataStream.getGenerationLifecycleDate(indexMetadata).millis(), is(creationTimeMillis));
+        }
+        {
+            // for a write index that has not been rolled over yet, we get null even if the index has an origination date
+            long originTimeMillis = creationTimeMillis - 3000L;
+            IndexMetadata.Builder indexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 1))
+                .settings(settings(IndexVersion.current()).put(LIFECYCLE_ORIGINATION_DATE, originTimeMillis))
+                .numberOfShards(1)
+                .numberOfReplicas(1)
+                .creationDate(creationTimeMillis);
+            IndexMetadata indexMetadata = indexMetaBuilder.build();
+            DataStream dataStream = new DataStream(
+                dataStreamName,
+                List.of(indexMetadata.getIndex()),
+                1L,
+                Map.of(),
+                false,
+                randomBoolean(),
+                false,
+                randomBoolean(),
+                IndexMode.STANDARD
+            );
 
-            assertThat(DataStream.getCreationOrRolloverDate(dataStreamName, indexMetaBuilder.build()).millis(), is(creationTimeMillis));
+            assertNull(dataStream.getGenerationLifecycleDate(indexMetadata));
+        }
+        {
+            // If the index is not the write index and has origination date set, we get the origination date even if it has not been
+            // rolled over
+            IndexMetadata.Builder writeIndexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 2))
+                .settings(settings(IndexVersion.current()))
+                .numberOfShards(1)
+                .numberOfReplicas(1)
+                .creationDate(now - 3000L);
+            long originTimeMillis = creationTimeMillis - 3000L;
+            IndexMetadata.Builder indexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 1))
+                .settings(settings(IndexVersion.current()).put(LIFECYCLE_ORIGINATION_DATE, originTimeMillis))
+                .numberOfShards(1)
+                .numberOfReplicas(1)
+                .creationDate(creationTimeMillis);
+            IndexMetadata indexMetadata = indexMetaBuilder.build();
+            DataStream dataStream = new DataStream(
+                dataStreamName,
+                List.of(indexMetadata.getIndex(), writeIndexMetaBuilder.build().getIndex()),
+                1L,
+                Map.of(),
+                false,
+                randomBoolean(),
+                false,
+                randomBoolean(),
+                IndexMode.STANDARD
+            );
+            assertThat(dataStream.getGenerationLifecycleDate(indexMetadata).millis(), is(originTimeMillis));
+        }
+        {
+            // If the index has already rolled over and has an origination date, we always get the origination date
+            IndexMetadata.Builder writeIndexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 2))
+                .settings(settings(IndexVersion.current()))
+                .numberOfShards(1)
+                .numberOfReplicas(1)
+                .creationDate(now - 3000L);
+            long originTimeMillis = creationTimeMillis - 3000L;
+            IndexMetadata.Builder indexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 1))
+                .settings(settings(IndexVersion.current()).put(LIFECYCLE_ORIGINATION_DATE, originTimeMillis))
+                .numberOfShards(1)
+                .numberOfReplicas(1)
+                .creationDate(creationTimeMillis);
+
+            MaxAgeCondition rolloverCondition = new MaxAgeCondition(TimeValue.timeValueMillis(rolloverTimeMills));
+            indexMetaBuilder.putRolloverInfo(new RolloverInfo(dataStreamName, List.of(rolloverCondition), now - 2000L));
+            IndexMetadata indexMetadata = indexMetaBuilder.build();
+            DataStream dataStream = new DataStream(
+                dataStreamName,
+                List.of(indexMetadata.getIndex(), writeIndexMetaBuilder.build().getIndex()),
+                1L,
+                Map.of(),
+                false,
+                randomBoolean(),
+                false,
+                randomBoolean(),
+                IndexMode.STANDARD
+            );
+            assertThat(dataStream.getGenerationLifecycleDate(indexMetadata).millis(), is(originTimeMillis));
+        }
+        {
+            // for rolled indices on other targets than the data stream name we get the origin date if origin date is set
+            IndexMetadata.Builder writeIndexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 2))
+                .settings(settings(IndexVersion.current()))
+                .numberOfShards(1)
+                .numberOfReplicas(1)
+                .creationDate(now - 3000L);
+            long originTimeMillis = creationTimeMillis - 3000L;
+            IndexMetadata.Builder indexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, 1))
+                .settings(settings(IndexVersion.current()).put(LIFECYCLE_ORIGINATION_DATE, originTimeMillis))
+                .numberOfShards(1)
+                .numberOfReplicas(1)
+                .creationDate(creationTimeMillis);
+
+            MaxAgeCondition rolloverCondition = new MaxAgeCondition(TimeValue.timeValueMillis(rolloverTimeMills));
+            indexMetaBuilder.putRolloverInfo(new RolloverInfo("some-alias-name", List.of(rolloverCondition), now - 2000L));
+            IndexMetadata indexMetadata = indexMetaBuilder.build();
+            DataStream dataStream = new DataStream(
+                dataStreamName,
+                List.of(indexMetadata.getIndex(), writeIndexMetaBuilder.build().getIndex()),
+                1L,
+                Map.of(),
+                false,
+                randomBoolean(),
+                false,
+                randomBoolean(),
+                IndexMode.STANDARD
+            );
+            assertThat(dataStream.getGenerationLifecycleDate(indexMetadata).millis(), is(originTimeMillis));
         }
     }
 
@@ -869,12 +1054,12 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         String dataStreamName = "metrics-foo";
         long now = System.currentTimeMillis();
 
-        List<Tuple<Long, Long>> creationAndRolloverTimes = List.of(
-            Tuple.tuple(now - 5000, now - 4000),
-            Tuple.tuple(now - 4000, now - 3000),
-            Tuple.tuple(now - 3000, now - 2000),
-            Tuple.tuple(now - 2000, now - 1000),
-            Tuple.tuple(now, null)
+        List<DataStreamMetadata> creationAndRolloverTimes = List.of(
+            DataStreamMetadata.dataStreamMetadata(now - 5000, now - 4000),
+            DataStreamMetadata.dataStreamMetadata(now - 4000, now - 3000),
+            DataStreamMetadata.dataStreamMetadata(now - 3000, now - 2000),
+            DataStreamMetadata.dataStreamMetadata(now - 2000, now - 1000),
+            DataStreamMetadata.dataStreamMetadata(now, null)
         );
 
         Metadata.Builder builder = Metadata.builder();
@@ -882,29 +1067,43 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
             builder,
             dataStreamName,
             creationAndRolloverTimes,
-            settings(Version.CURRENT),
-            new DataLifecycle()
+            settings(IndexVersion.current()),
+            new DataStreamLifecycle()
         );
         Metadata metadata = builder.build();
         {
-            List<Index> backingIndices = dataStream.getIndicesOlderThan(TimeValue.timeValueMillis(2500), metadata::index, null, () -> now);
+            List<Index> backingIndices = dataStream.getNonWriteIndicesOlderThan(
+                TimeValue.timeValueMillis(2500),
+                metadata::index,
+                null,
+                () -> now
+            );
             assertThat(backingIndices.size(), is(2));
             assertThat(backingIndices.get(0).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 1)));
             assertThat(backingIndices.get(1).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 2)));
         }
 
         {
-            List<Index> backingIndices = dataStream.getIndicesOlderThan(TimeValue.timeValueMillis(0), metadata::index, null, () -> now);
-            assertThat(backingIndices.size(), is(5));
+            List<Index> backingIndices = dataStream.getNonWriteIndicesOlderThan(
+                TimeValue.timeValueMillis(0),
+                metadata::index,
+                null,
+                () -> now
+            );
+            assertThat(backingIndices.size(), is(4));
             assertThat(backingIndices.get(0).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 1)));
             assertThat(backingIndices.get(1).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 2)));
             assertThat(backingIndices.get(2).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 3)));
             assertThat(backingIndices.get(3).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 4)));
-            assertThat(backingIndices.get(4).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 5)));
         }
 
         {
-            List<Index> backingIndices = dataStream.getIndicesOlderThan(TimeValue.timeValueMillis(6000), metadata::index, null, () -> now);
+            List<Index> backingIndices = dataStream.getNonWriteIndicesOlderThan(
+                TimeValue.timeValueMillis(6000),
+                metadata::index,
+                null,
+                () -> now
+            );
             assertThat(backingIndices.isEmpty(), is(true));
         }
 
@@ -912,15 +1111,14 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
             Predicate<IndexMetadata> genThreeAndFivePredicate = indexMetadata -> indexMetadata.getIndex().getName().endsWith("00003")
                 || indexMetadata.getIndex().getName().endsWith("00005");
 
-            List<Index> backingIndices = dataStream.getIndicesOlderThan(
+            List<Index> backingIndices = dataStream.getNonWriteIndicesOlderThan(
                 TimeValue.timeValueMillis(0),
                 metadata::index,
                 genThreeAndFivePredicate,
                 () -> now
             );
-            assertThat(backingIndices.size(), is(2));
+            assertThat(backingIndices.size(), is(1));
             assertThat(backingIndices.get(0).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 3)));
-            assertThat(backingIndices.get(1).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 5)));
         }
 
     }
@@ -929,53 +1127,85 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         String dataStreamName = "metrics-foo";
         long now = System.currentTimeMillis();
 
-        List<Tuple<Long, Long>> creationAndRolloverTimes = List.of(
-            Tuple.tuple(now - 5000, now - 4000),
-            Tuple.tuple(now - 4000, now - 3000),
-            Tuple.tuple(now - 3000, now - 2000),
-            Tuple.tuple(now - 2000, now - 1000),
-            Tuple.tuple(now, null)
+        List<DataStreamMetadata> creationAndRolloverTimes = List.of(
+            DataStreamMetadata.dataStreamMetadata(now - 5000, now - 4000),
+            DataStreamMetadata.dataStreamMetadata(now - 4000, now - 3000),
+            DataStreamMetadata.dataStreamMetadata(now - 3000, now - 2000),
+            DataStreamMetadata.dataStreamMetadata(now - 2000, now - 1000),
+            DataStreamMetadata.dataStreamMetadata(now, null)
         );
 
         {
             // no lifecycle configured so we expect an empty list
             Metadata.Builder builder = Metadata.builder();
-            DataStream dataStream = createDataStream(builder, dataStreamName, creationAndRolloverTimes, settings(Version.CURRENT), null);
+            DataStream dataStream = createDataStream(
+                builder,
+                dataStreamName,
+                creationAndRolloverTimes,
+                settings(IndexVersion.current()),
+                null
+            );
             Metadata metadata = builder.build();
 
-            assertThat(dataStream.getIndicesPastRetention(metadata::index, () -> now).isEmpty(), is(true));
+            assertThat(dataStream.getIndicesPastRetention(metadata::index, () -> now, randomGlobalRetention()).isEmpty(), is(true));
         }
 
         {
-            // no retention configured so we expect an empty list
+            // no retention configured but we have default retention
+            DataStreamGlobalRetention globalRetention = new DataStreamGlobalRetention(
+                TimeValue.timeValueMillis(2500),
+                randomBoolean() ? TimeValue.timeValueMillis(randomIntBetween(2500, 5000)) : null
+            );
             Metadata.Builder builder = Metadata.builder();
             DataStream dataStream = createDataStream(
                 builder,
                 dataStreamName,
                 creationAndRolloverTimes,
-                settings(Version.CURRENT),
-                new DataLifecycle()
+                settings(IndexVersion.current()),
+                new DataStreamLifecycle()
             );
             Metadata metadata = builder.build();
 
-            assertThat(dataStream.getIndicesPastRetention(metadata::index, () -> now).isEmpty(), is(true));
-        }
-
-        {
-            Metadata.Builder builder = Metadata.builder();
-            DataStream dataStream = createDataStream(
-                builder,
-                dataStreamName,
-                creationAndRolloverTimes,
-                settings(Version.CURRENT),
-                new DataLifecycle(TimeValue.timeValueMillis(2500))
-            );
-            Metadata metadata = builder.build();
-
-            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now);
+            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now, globalRetention);
             assertThat(backingIndices.size(), is(2));
-            assertThat(backingIndices.get(0).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 1)));
-            assertThat(backingIndices.get(1).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 2)));
+            assertThat(backingIndices.get(0).getName(), is(dataStream.getIndices().get(0).getName()));
+            assertThat(backingIndices.get(1).getName(), is(dataStream.getIndices().get(1).getName()));
+        }
+
+        {
+            // no retention configured but we have max retention
+            DataStreamGlobalRetention globalRetention = new DataStreamGlobalRetention(null, TimeValue.timeValueMillis(2500));
+            Metadata.Builder builder = Metadata.builder();
+            DataStream dataStream = createDataStream(
+                builder,
+                dataStreamName,
+                creationAndRolloverTimes,
+                settings(IndexVersion.current()),
+                new DataStreamLifecycle()
+            );
+            Metadata metadata = builder.build();
+
+            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now, globalRetention);
+            assertThat(backingIndices.size(), is(2));
+            assertThat(backingIndices.get(0).getName(), is(dataStream.getIndices().get(0).getName()));
+            assertThat(backingIndices.get(1).getName(), is(dataStream.getIndices().get(1).getName()));
+        }
+
+        {
+            Metadata.Builder builder = Metadata.builder();
+            DataStream dataStream = createDataStream(
+                builder,
+                dataStreamName,
+                creationAndRolloverTimes,
+                settings(IndexVersion.current()),
+                DataStreamLifecycle.newBuilder().dataRetention(2500).build()
+            );
+            Metadata metadata = builder.build();
+
+            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now, randomGlobalRetention());
+            assertThat(backingIndices.size(), is(2));
+            assertThat(backingIndices.get(0).getName(), is(dataStream.getIndices().get(0).getName()));
+            assertThat(backingIndices.get(1).getName(), is(dataStream.getIndices().get(1).getName()));
         }
 
         {
@@ -985,18 +1215,18 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
                 builder,
                 dataStreamName,
                 creationAndRolloverTimes,
-                settings(Version.CURRENT),
-                new DataLifecycle(TimeValue.timeValueMillis(0))
+                settings(IndexVersion.current()),
+                DataStreamLifecycle.newBuilder().dataRetention(0).build()
             );
             Metadata metadata = builder.build();
 
-            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now);
+            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now, randomGlobalRetention());
 
             assertThat(backingIndices.size(), is(4));
-            assertThat(backingIndices.get(0).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 1)));
-            assertThat(backingIndices.get(1).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 2)));
-            assertThat(backingIndices.get(2).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 3)));
-            assertThat(backingIndices.get(3).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 4)));
+            assertThat(backingIndices.get(0).getName(), is(dataStream.getIndices().get(0).getName()));
+            assertThat(backingIndices.get(1).getName(), is(dataStream.getIndices().get(1).getName()));
+            assertThat(backingIndices.get(2).getName(), is(dataStream.getIndices().get(2).getName()));
+            assertThat(backingIndices.get(3).getName(), is(dataStream.getIndices().get(3).getName()));
         }
 
         {
@@ -1006,17 +1236,17 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
                 builder,
                 dataStreamName,
                 creationAndRolloverTimes,
-                settings(Version.CURRENT),
-                new DataLifecycle(TimeValue.timeValueMillis(6000))
+                settings(IndexVersion.current()),
+                DataStreamLifecycle.newBuilder().dataRetention(6000).build()
             );
             Metadata metadata = builder.build();
 
-            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now);
+            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now, randomGlobalRetention());
             assertThat(backingIndices.isEmpty(), is(true));
         }
 
         {
-            // no indices are returned as even though all pass retention age none are managed by DLM
+            // no indices are returned as even though all pass retention age none are managed by data stream lifecycle
             Metadata.Builder builder = Metadata.builder();
             DataStream dataStream = createDataStream(
                 builder,
@@ -1024,45 +1254,273 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
                 creationAndRolloverTimes,
                 Settings.builder()
                     .put(IndexMetadata.LIFECYCLE_NAME, "ILM_policy")
-                    .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT),
-                new DataLifecycle(TimeValue.timeValueMillis(0))
+                    .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current()),
+                DataStreamLifecycle.newBuilder().dataRetention(0).build()
             );
             Metadata metadata = builder.build();
 
-            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now);
+            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now, randomGlobalRetention());
             assertThat(backingIndices.isEmpty(), is(true));
         }
     }
 
-    public void testIsIndexManagedByDLM() {
+    public void testGetIndicesPastRetentionWithOriginationDate() {
+        // First, build an ordinary data stream:
+        String dataStreamName = "metrics-foo";
+        long now = System.currentTimeMillis();
+        List<DataStreamMetadata> creationAndRolloverTimes = List.of(
+            DataStreamMetadata.dataStreamMetadata(now - 5000, now - 4000),
+            DataStreamMetadata.dataStreamMetadata(now - 4000, now - 3000),
+            DataStreamMetadata.dataStreamMetadata(now - 3000, now - 2000),
+            DataStreamMetadata.dataStreamMetadata(now - 2000, now - 1000),
+            DataStreamMetadata.dataStreamMetadata(now, null, now - 8000), // origination date older than retention
+            DataStreamMetadata.dataStreamMetadata(now, null, now - 1000), // origination date within retention
+            DataStreamMetadata.dataStreamMetadata(now, null)
+        );
+        Metadata.Builder metadataBuilder = Metadata.builder();
+        AtomicReference<TimeValue> testRetentionReference = new AtomicReference<>(null);
+        DataStream dataStream = createDataStream(
+            metadataBuilder,
+            dataStreamName,
+            creationAndRolloverTimes,
+            settings(IndexVersion.current()),
+            new DataStreamLifecycle() {
+                public TimeValue getDataStreamRetention() {
+                    return testRetentionReference.get();
+                }
+            }
+        );
+        Metadata metadata = metadataBuilder.build();
+        {
+            // no retention configured so we expect an empty list
+            testRetentionReference.set(null);
+            assertThat(dataStream.getIndicesPastRetention(metadata::index, () -> now, null).isEmpty(), is(true));
+        }
+
+        {
+            // retention period where oldIndex is too old, but newIndex should be retained
+            testRetentionReference.set(TimeValue.timeValueMillis(2500));
+            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now, null);
+            assertThat(backingIndices.size(), is(3));
+            assertThat(backingIndices.get(0).getName(), is(dataStream.getIndices().get(0).getName()));
+            assertThat(backingIndices.get(1).getName(), is(dataStream.getIndices().get(1).getName()));
+            assertThat(backingIndices.get(2).getName(), is(dataStream.getIndices().get(5).getName()));
+        }
+
+        {
+            // even though all indices match the write index should not be returned
+            testRetentionReference.set(TimeValue.timeValueMillis(0));
+            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now, null);
+
+            assertThat(backingIndices.size(), is(6));
+            assertThat(backingIndices.get(0).getName(), is(dataStream.getIndices().get(0).getName()));
+            assertThat(backingIndices.get(1).getName(), is(dataStream.getIndices().get(1).getName()));
+            assertThat(backingIndices.get(2).getName(), is(dataStream.getIndices().get(2).getName()));
+            assertThat(backingIndices.get(3).getName(), is(dataStream.getIndices().get(3).getName()));
+            assertThat(backingIndices.get(4).getName(), is(dataStream.getIndices().get(4).getName()));
+            assertThat(backingIndices.get(5).getName(), is(dataStream.getIndices().get(5).getName()));
+        }
+
+        {
+            // no index matches the retention age
+            testRetentionReference.set(TimeValue.timeValueMillis(9000));
+            List<Index> backingIndices = dataStream.getIndicesPastRetention(metadata::index, () -> now, null);
+            assertThat(backingIndices.isEmpty(), is(true));
+        }
+    }
+
+    public void testGetDownsampleRounds() {
         String dataStreamName = "metrics-foo";
         long now = System.currentTimeMillis();
 
-        List<Tuple<Long, Long>> creationAndRolloverTimes = List.of(
-            Tuple.tuple(now - 5000, now - 4000),
-            Tuple.tuple(now - 4000, now - 3000),
-            Tuple.tuple(now - 3000, now - 2000),
-            Tuple.tuple(now - 2000, now - 1000),
-            Tuple.tuple(now, null)
+        List<DataStreamMetadata> creationAndRolloverTimes = List.of(
+            DataStreamMetadata.dataStreamMetadata(now - 5000, now - 4000),
+            DataStreamMetadata.dataStreamMetadata(now - 4000, now - 3000),
+            DataStreamMetadata.dataStreamMetadata(now - 3000, now - 2000),
+            DataStreamMetadata.dataStreamMetadata(now - 2000, now - 1000),
+            DataStreamMetadata.dataStreamMetadata(now, null)
+        );
+
+        {
+            Metadata.Builder builder = Metadata.builder();
+            DataStream dataStream = createDataStream(
+                builder,
+                dataStreamName,
+                creationAndRolloverTimes,
+                settings(IndexVersion.current()).put(IndexSettings.MODE.getKey(), IndexMode.TIME_SERIES)
+                    .put("index.routing_path", "@timestamp"),
+                DataStreamLifecycle.newBuilder()
+                    .downsampling(
+                        new DataStreamLifecycle.Downsampling(
+                            List.of(
+                                new DataStreamLifecycle.Downsampling.Round(
+                                    TimeValue.timeValueMillis(2000),
+                                    new DownsampleConfig(new DateHistogramInterval("10m"))
+                                ),
+                                new DataStreamLifecycle.Downsampling.Round(
+                                    TimeValue.timeValueMillis(3200),
+                                    new DownsampleConfig(new DateHistogramInterval("100m"))
+                                ),
+                                new DataStreamLifecycle.Downsampling.Round(
+                                    TimeValue.timeValueMillis(3500),
+                                    new DownsampleConfig(new DateHistogramInterval("1000m"))
+                                )
+                            )
+                        )
+                    )
+                    .build()
+            );
+            Metadata metadata = builder.build();
+
+            // generation time is now - 2000
+            String thirdGeneration = DataStream.getDefaultBackingIndexName(dataStreamName, 3);
+            Index thirdIndex = metadata.index(thirdGeneration).getIndex();
+            List<DataStreamLifecycle.Downsampling.Round> roundsForThirdIndex = dataStream.getDownsamplingRoundsFor(
+                thirdIndex,
+                metadata::index,
+                () -> now
+            );
+
+            assertThat(roundsForThirdIndex.size(), is(1));
+            assertThat(roundsForThirdIndex.get(0).after(), is(TimeValue.timeValueMillis(2000)));
+
+            // generation time is now - 40000
+            String firstGeneration = DataStream.getDefaultBackingIndexName(dataStreamName, 1);
+            Index firstIndex = metadata.index(firstGeneration).getIndex();
+            List<DataStreamLifecycle.Downsampling.Round> roundsForFirstIndex = dataStream.getDownsamplingRoundsFor(
+                firstIndex,
+                metadata::index,
+                () -> now
+            );
+            // expecting all rounds to match this index
+            assertThat(roundsForFirstIndex.size(), is(3));
+            // assert the order is maintained
+            assertThat(
+                roundsForFirstIndex.stream().map(DataStreamLifecycle.Downsampling.Round::after).toList(),
+                is(List.of(TimeValue.timeValueMillis(2000), TimeValue.timeValueMillis(3200), TimeValue.timeValueMillis(3500)))
+            );
+        }
+
+        {
+            // non-timeseries indices should be skipped
+            Metadata.Builder builder = Metadata.builder();
+            DataStream dataStream = createDataStream(
+                builder,
+                dataStreamName,
+                creationAndRolloverTimes,
+                // no TSDB settings
+                settings(IndexVersion.current()),
+                DataStreamLifecycle.newBuilder()
+                    .downsampling(
+                        new DataStreamLifecycle.Downsampling(
+                            List.of(
+                                new DataStreamLifecycle.Downsampling.Round(
+                                    TimeValue.timeValueMillis(2000),
+                                    new DownsampleConfig(new DateHistogramInterval("10m"))
+                                ),
+                                new DataStreamLifecycle.Downsampling.Round(
+                                    TimeValue.timeValueMillis(3200),
+                                    new DownsampleConfig(new DateHistogramInterval("100m"))
+                                ),
+                                new DataStreamLifecycle.Downsampling.Round(
+                                    TimeValue.timeValueMillis(3500),
+                                    new DownsampleConfig(new DateHistogramInterval("1000m"))
+                                )
+                            )
+                        )
+                    )
+                    .build()
+            );
+            Metadata metadata = builder.build();
+
+            // generation time is now - 40000
+            String firstGeneration = DataStream.getDefaultBackingIndexName(dataStreamName, 1);
+            Index firstIndex = metadata.index(firstGeneration).getIndex();
+            List<DataStreamLifecycle.Downsampling.Round> roundsForFirstIndex = dataStream.getDownsamplingRoundsFor(
+                firstIndex,
+                metadata::index,
+                () -> now
+            );
+            assertThat(roundsForFirstIndex.size(), is(0));
+        }
+
+        {
+            // backing indices for data streams without lifecycle don't match any rounds
+            Metadata.Builder builder = Metadata.builder();
+            DataStream dataStream = createDataStream(
+                builder,
+                dataStreamName,
+                creationAndRolloverTimes,
+                settings(IndexVersion.current()).put(IndexSettings.MODE.getKey(), IndexMode.TIME_SERIES)
+                    .put("index.routing_path", "@timestamp"),
+                null
+            );
+            Metadata metadata = builder.build();
+
+            // generation time is now - 40000
+            String firstGeneration = DataStream.getDefaultBackingIndexName(dataStreamName, 1);
+            Index firstIndex = metadata.index(firstGeneration).getIndex();
+            List<DataStreamLifecycle.Downsampling.Round> roundsForFirstIndex = dataStream.getDownsamplingRoundsFor(
+                firstIndex,
+                metadata::index,
+                () -> now
+            );
+            assertThat(roundsForFirstIndex.size(), is(0));
+        }
+
+        {
+            // backing indices for data streams without downsampling configured don't match any rounds
+            Metadata.Builder builder = Metadata.builder();
+            DataStream dataStream = createDataStream(
+                builder,
+                dataStreamName,
+                creationAndRolloverTimes,
+                settings(IndexVersion.current()).put(IndexSettings.MODE.getKey(), IndexMode.TIME_SERIES)
+                    .put("index.routing_path", "@timestamp"),
+                DataStreamLifecycle.newBuilder().build()
+            );
+            Metadata metadata = builder.build();
+
+            String firstGeneration = DataStream.getDefaultBackingIndexName(dataStreamName, 1);
+            Index firstIndex = metadata.index(firstGeneration).getIndex();
+            List<DataStreamLifecycle.Downsampling.Round> roundsForFirstIndex = dataStream.getDownsamplingRoundsFor(
+                firstIndex,
+                metadata::index,
+                () -> now
+            );
+            assertThat(roundsForFirstIndex.size(), is(0));
+        }
+    }
+
+    public void testIsIndexManagedByDataStreamLifecycle() {
+        String dataStreamName = "metrics-foo";
+        long now = System.currentTimeMillis();
+
+        List<DataStreamMetadata> creationAndRolloverTimes = List.of(
+            DataStreamMetadata.dataStreamMetadata(now - 5000, now - 4000),
+            DataStreamMetadata.dataStreamMetadata(now - 4000, now - 3000),
+            DataStreamMetadata.dataStreamMetadata(now - 3000, now - 2000),
+            DataStreamMetadata.dataStreamMetadata(now - 2000, now - 1000),
+            DataStreamMetadata.dataStreamMetadata(now, null)
         );
         Metadata.Builder builder = Metadata.builder();
         DataStream dataStream = createDataStream(
             builder,
             dataStreamName,
             creationAndRolloverTimes,
-            settings(Version.CURRENT),
-            new DataLifecycle(TimeValue.timeValueMillis(0))
+            settings(IndexVersion.current()),
+            DataStreamLifecycle.newBuilder().dataRetention(0).build()
         );
         Metadata metadata = builder.build();
 
         {
             // false for indices not part of the data stream
-            assertThat(dataStream.isIndexManagedByDLM(new Index("standalone_index", "uuid"), metadata::index), is(false));
+            assertThat(dataStream.isIndexManagedByDataStreamLifecycle(new Index("standalone_index", "uuid"), metadata::index), is(false));
         }
 
         {
             // false for indices that were deleted
-            assertThat(dataStream.isIndexManagedByDLM(dataStream.getIndices().get(1), (index) -> null), is(false));
+            assertThat(dataStream.isIndexManagedByDataStreamLifecycle(dataStream.getIndices().get(1), (index) -> null), is(false));
         }
 
         {
@@ -1072,11 +1530,14 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
                 newBuilder,
                 dataStreamName,
                 creationAndRolloverTimes,
-                settings(Version.CURRENT),
+                settings(IndexVersion.current()),
                 null
             );
             Metadata newMetadata = newBuilder.build();
-            assertThat(unmanagedDataStream.isIndexManagedByDLM(unmanagedDataStream.getIndices().get(1), newMetadata::index), is(false));
+            assertThat(
+                unmanagedDataStream.isIndexManagedByDataStreamLifecycle(unmanagedDataStream.getIndices().get(1), newMetadata::index),
+                is(false)
+            );
         }
 
         {
@@ -1088,46 +1549,109 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
                 creationAndRolloverTimes,
                 Settings.builder()
                     .put(IndexMetadata.LIFECYCLE_NAME, "ILM_policy")
-                    .put(IndexMetadata.SETTING_VERSION_CREATED, Version.CURRENT),
-                new DataLifecycle()
+                    .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current()),
+                new DataStreamLifecycle()
             );
             Metadata metadataIlm = builderWithIlm.build();
             for (Index index : ds.getIndices()) {
-                assertThat(ds.isIndexManagedByDLM(index, metadataIlm::index), is(false));
+                assertThat(ds.isIndexManagedByDataStreamLifecycle(index, metadataIlm::index), is(false));
+            }
+        }
+
+        {
+            // true for indices that have an ILM policy configured AND the prefer_ilm setting configured to false
+            {
+                // false for indices that have an ILM policy configured
+                Metadata.Builder builderWithIlm = Metadata.builder();
+                DataStream ds = createDataStream(
+                    builderWithIlm,
+                    dataStreamName,
+                    creationAndRolloverTimes,
+                    Settings.builder()
+                        .put(IndexMetadata.LIFECYCLE_NAME, "ILM_policy")
+                        .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
+                        .put(IndexSettings.PREFER_ILM, false),
+                    new DataStreamLifecycle()
+                );
+                Metadata metadataIlm = builderWithIlm.build();
+                for (Index index : ds.getIndices()) {
+                    assertThat(ds.isIndexManagedByDataStreamLifecycle(index, metadataIlm::index), is(true));
+                }
             }
         }
 
         {
             // true otherwise
             for (Index index : dataStream.getIndices()) {
-                assertThat(dataStream.isIndexManagedByDLM(index, metadata::index), is(true));
+                assertThat(dataStream.isIndexManagedByDataStreamLifecycle(index, metadata::index), is(true));
             }
         }
+    }
+
+    public void testGetIndicesOlderThanWithOriginationDate() {
+        // First, build an ordinary datastream:
+        String dataStreamName = "metrics-foo";
+        long now = System.currentTimeMillis();
+        List<DataStreamMetadata> creationAndRolloverTimes = List.of(
+            DataStreamMetadata.dataStreamMetadata(now - 5000, now - 4000),
+            DataStreamMetadata.dataStreamMetadata(now - 4000, now - 3000),
+            DataStreamMetadata.dataStreamMetadata(now - 3000, now - 2000),
+            DataStreamMetadata.dataStreamMetadata(now - 2000, now - 1000),
+            DataStreamMetadata.dataStreamMetadata(now, null, now - 7000), // origination date older than retention
+            DataStreamMetadata.dataStreamMetadata(now, null, now - 1000), // origination date within retention
+            DataStreamMetadata.dataStreamMetadata(now, null, now - 7000) // write index origination date older than retention
+        );
+        Metadata.Builder builder = Metadata.builder();
+        DataStream dataStream = createDataStream(
+            builder,
+            dataStreamName,
+            creationAndRolloverTimes,
+            settings(IndexVersion.current()),
+            new DataStreamLifecycle()
+        );
+        Metadata metadata = builder.build();
+
+        List<Index> backingIndices = dataStream.getNonWriteIndicesOlderThan(
+            TimeValue.timeValueMillis(2500),
+            metadata::index,
+            null,
+            () -> now
+        );
+        // We expect to see the index with the really old origination date, but not the one with the more recent origination date (and
+        // not the write index)
+        assertThat(backingIndices.size(), is(3));
+        assertThat(backingIndices.get(0).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 1)));
+        assertThat(backingIndices.get(1).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 2)));
+        assertThat(backingIndices.get(2).getName(), is(DataStream.getDefaultBackingIndexName(dataStreamName, 6)));
     }
 
     private DataStream createDataStream(
         Metadata.Builder builder,
         String dataStreamName,
-        List<Tuple<Long, Long>> creationAndRolloverTimes,
+        List<DataStreamMetadata> creationAndRolloverTimes,
         Settings.Builder backingIndicesSettings,
-        @Nullable DataLifecycle lifecycle
+        @Nullable DataStreamLifecycle lifecycle
     ) {
         int backingIndicesCount = creationAndRolloverTimes.size();
         final List<Index> backingIndices = new ArrayList<>();
         for (int k = 1; k <= backingIndicesCount; k++) {
-            Tuple<Long, Long> creationRolloverTime = creationAndRolloverTimes.get(k - 1);
+            DataStreamMetadata creationRolloverTime = creationAndRolloverTimes.get(k - 1);
             IndexMetadata.Builder indexMetaBuilder = IndexMetadata.builder(DataStream.getDefaultBackingIndexName(dataStreamName, k))
                 .settings(backingIndicesSettings)
                 .numberOfShards(1)
                 .numberOfReplicas(1)
-                .creationDate(creationRolloverTime.v1());
+                .creationDate(creationRolloverTime.creationTimeInMillis());
             if (k < backingIndicesCount) {
                 // add rollover info only for non-write indices
-                Long rolloverTimeMillis = creationRolloverTime.v2();
+                Long rolloverTimeMillis = creationRolloverTime.rolloverTimeInMillis();
                 if (rolloverTimeMillis != null) {
                     MaxAgeCondition rolloverCondition = new MaxAgeCondition(TimeValue.timeValueMillis(rolloverTimeMillis));
                     indexMetaBuilder.putRolloverInfo(new RolloverInfo(dataStreamName, List.of(rolloverCondition), rolloverTimeMillis));
                 }
+            }
+            Long originationTimeInMillis = creationRolloverTime.originationTimeInMillis;
+            if (originationTimeInMillis != null) {
+                backingIndicesSettings.put(LIFECYCLE_ORIGINATION_DATE, originationTimeInMillis);
             }
             IndexMetadata indexMetadata = indexMetaBuilder.build();
             builder.put(indexMetadata, false);
@@ -1136,7 +1660,7 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         return newInstance(dataStreamName, backingIndices, backingIndicesCount, null, false, lifecycle);
     }
 
-    public void testXContentSerializationWithRollover() throws IOException {
+    public void testXContentSerializationWithRolloverAndEffectiveRetention() throws IOException {
         String dataStreamName = randomAlphaOfLength(10).toLowerCase(Locale.ROOT);
         List<Index> indices = randomIndexInstances();
         long generation = indices.size() + ESTestCase.randomLongBetween(1, 128);
@@ -1145,8 +1669,13 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
         if (randomBoolean()) {
             metadata = Map.of("key", "value");
         }
+        boolean failureStore = randomBoolean();
+        List<Index> failureIndices = List.of();
+        if (failureStore) {
+            failureIndices = randomNonEmptyIndexInstances();
+        }
 
-        DataLifecycle lifecycle = new DataLifecycle(randomMillisUpToYear9999());
+        DataStreamLifecycle lifecycle = new DataStreamLifecycle();
         DataStream dataStream = new DataStream(
             dataStreamName,
             indices,
@@ -1158,18 +1687,355 @@ public class DataStreamTests extends AbstractXContentSerializingTestCase<DataStr
             System::currentTimeMillis,
             randomBoolean(),
             randomBoolean() ? IndexMode.STANDARD : null, // IndexMode.TIME_SERIES triggers validation that many unit tests doesn't pass
-            lifecycle
+            lifecycle,
+            failureStore,
+            failureIndices,
+            false,
+            null
         );
 
         try (XContentBuilder builder = XContentBuilder.builder(XContentType.JSON.xContent())) {
             builder.humanReadable(true);
             RolloverConfiguration rolloverConfiguration = RolloverConfigurationTests.randomRolloverConditions();
-            dataStream.toXContent(builder, ToXContent.EMPTY_PARAMS, rolloverConfiguration);
+            DataStreamGlobalRetention globalRetention = DataStreamGlobalRetentionSerializationTests.randomGlobalRetention();
+
+            ToXContent.Params withEffectiveRetention = new ToXContent.MapParams(DataStreamLifecycle.INCLUDE_EFFECTIVE_RETENTION_PARAMS);
+            dataStream.toXContent(builder, withEffectiveRetention, rolloverConfiguration, globalRetention);
             String serialized = Strings.toString(builder);
             assertThat(serialized, containsString("rollover"));
-            for (String label : rolloverConfiguration.resolveRolloverConditions(lifecycle.getDataRetention()).getConditions().keySet()) {
+            for (String label : rolloverConfiguration.resolveRolloverConditions(lifecycle.getEffectiveDataRetention(globalRetention))
+                .getConditions()
+                .keySet()) {
                 assertThat(serialized, containsString(label));
             }
+            // We check that even if there was no retention provided by the user, the global retention applies
+            assertThat(serialized, not(containsString("data_retention")));
+            assertThat(serialized, containsString("effective_retention"));
+        }
+    }
+
+    public void testGetIndicesWithinMaxAgeRange() {
+        final TimeValue maxIndexAge = TimeValue.timeValueDays(7);
+
+        final Metadata.Builder metadataBuilder = Metadata.builder();
+        final int numberOfBackingIndicesOlderThanMinAge = randomIntBetween(0, 10);
+        final int numberOfBackingIndicesWithinMinAnge = randomIntBetween(0, 10);
+        final int numberOfShards = 1;
+        final List<Index> backingIndices = new ArrayList<>();
+        final String dataStreamName = "logs-es";
+        final List<Index> backingIndicesOlderThanMinAge = new ArrayList<>();
+        for (int i = 0; i < numberOfBackingIndicesOlderThanMinAge; i++) {
+            long creationDate = System.currentTimeMillis() - maxIndexAge.millis() * 2;
+            final IndexMetadata indexMetadata = createIndexMetadata(
+                DataStream.getDefaultBackingIndexName(dataStreamName, backingIndices.size(), creationDate),
+                randomIndexWriteLoad(numberOfShards),
+                creationDate
+            );
+            backingIndices.add(indexMetadata.getIndex());
+            backingIndicesOlderThanMinAge.add(indexMetadata.getIndex());
+            metadataBuilder.put(indexMetadata, false);
+        }
+
+        final List<Index> backingIndicesWithinMinAge = new ArrayList<>();
+        for (int i = 0; i < numberOfBackingIndicesWithinMinAnge; i++) {
+            final long createdAt = System.currentTimeMillis() - (maxIndexAge.getMillis() / 2);
+            final IndexMetadata indexMetadata = createIndexMetadata(
+                DataStream.getDefaultBackingIndexName(dataStreamName, backingIndices.size(), createdAt),
+                randomIndexWriteLoad(numberOfShards),
+                createdAt
+            );
+            backingIndices.add(indexMetadata.getIndex());
+            backingIndicesWithinMinAge.add(indexMetadata.getIndex());
+            metadataBuilder.put(indexMetadata, false);
+        }
+
+        final String writeIndexName = DataStream.getDefaultBackingIndexName(dataStreamName, backingIndices.size());
+        final IndexMetadata writeIndexMetadata = createIndexMetadata(writeIndexName, null, System.currentTimeMillis());
+        backingIndices.add(writeIndexMetadata.getIndex());
+        metadataBuilder.put(writeIndexMetadata, false);
+
+        final DataStream dataStream = new DataStream(
+            dataStreamName,
+            backingIndices,
+            backingIndices.size(),
+            Collections.emptyMap(),
+            false,
+            false,
+            false,
+            false,
+            randomBoolean() ? IndexMode.STANDARD : IndexMode.TIME_SERIES
+        );
+
+        metadataBuilder.put(dataStream);
+
+        final List<Index> indicesWithinMaxAgeRange = DataStream.getIndicesWithinMaxAgeRange(
+            dataStream,
+            metadataBuilder::getSafe,
+            maxIndexAge,
+            System::currentTimeMillis
+        );
+
+        final List<Index> expectedIndicesWithinMaxAgeRange = new ArrayList<>();
+        if (numberOfBackingIndicesOlderThanMinAge > 0) {
+            expectedIndicesWithinMaxAgeRange.add(backingIndicesOlderThanMinAge.get(backingIndicesOlderThanMinAge.size() - 1));
+        }
+        expectedIndicesWithinMaxAgeRange.addAll(backingIndicesWithinMinAge);
+        expectedIndicesWithinMaxAgeRange.add(writeIndexMetadata.getIndex());
+
+        assertThat(indicesWithinMaxAgeRange, is(equalTo(expectedIndicesWithinMaxAgeRange)));
+    }
+
+    public void testGetIndicesWithinMaxAgeRangeAllIndicesOutsideRange() {
+        final TimeValue maxIndexAge = TimeValue.timeValueDays(7);
+
+        final Metadata.Builder metadataBuilder = Metadata.builder();
+        final int numberOfBackingIndicesOlderThanMinAge = randomIntBetween(5, 10);
+        final int numberOfShards = 1;
+        final List<Index> backingIndices = new ArrayList<>();
+        final String dataStreamName = "logs-es";
+        final List<Index> backingIndicesOlderThanMinAge = new ArrayList<>();
+        for (int i = 0; i < numberOfBackingIndicesOlderThanMinAge; i++) {
+            long creationDate = System.currentTimeMillis() - maxIndexAge.millis() * 2;
+            final IndexMetadata indexMetadata = createIndexMetadata(
+                DataStream.getDefaultBackingIndexName(dataStreamName, backingIndices.size(), creationDate),
+                randomIndexWriteLoad(numberOfShards),
+                creationDate
+            );
+            backingIndices.add(indexMetadata.getIndex());
+            backingIndicesOlderThanMinAge.add(indexMetadata.getIndex());
+            metadataBuilder.put(indexMetadata, false);
+        }
+
+        final String writeIndexName = DataStream.getDefaultBackingIndexName(dataStreamName, backingIndices.size());
+        final IndexMetadata writeIndexMetadata = createIndexMetadata(
+            writeIndexName,
+            null,
+            System.currentTimeMillis() - maxIndexAge.millis() * 2
+        );
+        backingIndices.add(writeIndexMetadata.getIndex());
+        metadataBuilder.put(writeIndexMetadata, false);
+
+        final DataStream dataStream = new DataStream(
+            dataStreamName,
+            backingIndices,
+            backingIndices.size(),
+            Collections.emptyMap(),
+            false,
+            false,
+            false,
+            false,
+            randomBoolean() ? IndexMode.STANDARD : IndexMode.TIME_SERIES
+        );
+
+        metadataBuilder.put(dataStream);
+
+        final List<Index> indicesWithinMaxAgeRange = DataStream.getIndicesWithinMaxAgeRange(
+            dataStream,
+            metadataBuilder::getSafe,
+            maxIndexAge,
+            System::currentTimeMillis
+        );
+
+        final List<Index> expectedIndicesWithinMaxAgeRange = new ArrayList<>();
+        if (numberOfBackingIndicesOlderThanMinAge > 0) {
+            expectedIndicesWithinMaxAgeRange.add(backingIndicesOlderThanMinAge.get(backingIndicesOlderThanMinAge.size() - 1));
+        }
+        expectedIndicesWithinMaxAgeRange.add(writeIndexMetadata.getIndex());
+        assertThat(indicesWithinMaxAgeRange, is(equalTo(expectedIndicesWithinMaxAgeRange)));
+        assertThat(indicesWithinMaxAgeRange.get(indicesWithinMaxAgeRange.size() - 1).getName(), is(writeIndexName));
+    }
+
+    private IndexWriteLoad randomIndexWriteLoad(int numberOfShards) {
+        IndexWriteLoad.Builder builder = IndexWriteLoad.builder(numberOfShards);
+        for (int shardId = 0; shardId < numberOfShards; shardId++) {
+            builder.withShardWriteLoad(shardId, randomDoubleBetween(0, 64, true), randomLongBetween(1, 10));
+        }
+        return builder.build();
+    }
+
+    private IndexMetadata createIndexMetadata(String indexName, IndexWriteLoad indexWriteLoad, long createdAt) {
+        return IndexMetadata.builder(indexName)
+            .settings(
+                Settings.builder()
+                    .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
+                    .put(IndexMetadata.SETTING_NUMBER_OF_REPLICAS, 0)
+                    .put(IndexMetadata.SETTING_VERSION_CREATED, IndexVersion.current())
+                    .build()
+            )
+            .stats(indexWriteLoad == null ? null : new IndexMetadataStats(indexWriteLoad, 1, 1))
+            .creationDate(createdAt)
+            .build();
+    }
+
+    public void testWriteFailureIndex() {
+        boolean hidden = randomBoolean();
+        boolean system = hidden && randomBoolean();
+        DataStream noFailureStoreDataStream = new DataStream(
+            randomAlphaOfLength(10),
+            randomNonEmptyIndexInstances(),
+            randomNonNegativeInt(),
+            null,
+            hidden,
+            randomBoolean(),
+            system,
+            System::currentTimeMillis,
+            randomBoolean(),
+            randomBoolean() ? IndexMode.STANDARD : IndexMode.TIME_SERIES,
+            DataStreamLifecycleTests.randomLifecycle(),
+            false,
+            null,
+            randomBoolean(),
+            null
+        );
+        assertThat(noFailureStoreDataStream.getFailureStoreWriteIndex(), nullValue());
+
+        DataStream failureStoreDataStreamWithEmptyFailureIndices = new DataStream(
+            randomAlphaOfLength(10),
+            randomNonEmptyIndexInstances(),
+            randomNonNegativeInt(),
+            null,
+            hidden,
+            randomBoolean(),
+            system,
+            System::currentTimeMillis,
+            randomBoolean(),
+            randomBoolean() ? IndexMode.STANDARD : IndexMode.TIME_SERIES,
+            DataStreamLifecycleTests.randomLifecycle(),
+            true,
+            List.of(),
+            randomBoolean(),
+            null
+        );
+        assertThat(failureStoreDataStreamWithEmptyFailureIndices.getFailureStoreWriteIndex(), nullValue());
+
+        List<Index> failureIndices = randomIndexInstances();
+        String dataStreamName = randomAlphaOfLength(10);
+        Index writeFailureIndex = new Index(
+            getDefaultBackingIndexName(dataStreamName, randomNonNegativeInt()),
+            UUIDs.randomBase64UUID(LuceneTestCase.random())
+        );
+        failureIndices.add(writeFailureIndex);
+        DataStream failureStoreDataStream = new DataStream(
+            dataStreamName,
+            randomNonEmptyIndexInstances(),
+            randomNonNegativeInt(),
+            null,
+            hidden,
+            randomBoolean(),
+            system,
+            System::currentTimeMillis,
+            randomBoolean(),
+            randomBoolean() ? IndexMode.STANDARD : IndexMode.TIME_SERIES,
+            DataStreamLifecycleTests.randomLifecycle(),
+            true,
+            failureIndices,
+            randomBoolean(),
+            null
+        );
+        assertThat(failureStoreDataStream.getFailureStoreWriteIndex(), is(writeFailureIndex));
+    }
+
+    public void testIsFailureIndex() {
+        boolean hidden = randomBoolean();
+        boolean system = hidden && randomBoolean();
+        List<Index> backingIndices = randomNonEmptyIndexInstances();
+        DataStream noFailureStoreDataStream = new DataStream(
+            randomAlphaOfLength(10),
+            backingIndices,
+            randomNonNegativeInt(),
+            null,
+            hidden,
+            randomBoolean(),
+            system,
+            System::currentTimeMillis,
+            randomBoolean(),
+            randomBoolean() ? IndexMode.STANDARD : IndexMode.TIME_SERIES,
+            DataStreamLifecycleTests.randomLifecycle(),
+            false,
+            null,
+            randomBoolean(),
+            null
+        );
+        assertThat(
+            noFailureStoreDataStream.isFailureStoreIndex(backingIndices.get(randomIntBetween(0, backingIndices.size() - 1)).getName()),
+            is(false)
+        );
+
+        backingIndices = randomNonEmptyIndexInstances();
+        DataStream failureStoreDataStreamWithEmptyFailureIndices = new DataStream(
+            randomAlphaOfLength(10),
+            backingIndices,
+            randomNonNegativeInt(),
+            null,
+            hidden,
+            randomBoolean(),
+            system,
+            System::currentTimeMillis,
+            randomBoolean(),
+            randomBoolean() ? IndexMode.STANDARD : IndexMode.TIME_SERIES,
+            DataStreamLifecycleTests.randomLifecycle(),
+            true,
+            List.of(),
+            randomBoolean(),
+            null
+        );
+        assertThat(
+            failureStoreDataStreamWithEmptyFailureIndices.isFailureStoreIndex(
+                backingIndices.get(randomIntBetween(0, backingIndices.size() - 1)).getName()
+            ),
+            is(false)
+        );
+
+        backingIndices = randomNonEmptyIndexInstances();
+        List<Index> failureIndices = randomIndexInstances();
+        String dataStreamName = randomAlphaOfLength(10);
+        Index writeFailureIndex = new Index(
+            getDefaultBackingIndexName(dataStreamName, randomNonNegativeInt()),
+            UUIDs.randomBase64UUID(LuceneTestCase.random())
+        );
+        failureIndices.add(writeFailureIndex);
+        DataStream failureStoreDataStream = new DataStream(
+            dataStreamName,
+            backingIndices,
+            randomNonNegativeInt(),
+            null,
+            hidden,
+            randomBoolean(),
+            system,
+            System::currentTimeMillis,
+            randomBoolean(),
+            randomBoolean() ? IndexMode.STANDARD : IndexMode.TIME_SERIES,
+            DataStreamLifecycleTests.randomLifecycle(),
+            true,
+            failureIndices,
+            randomBoolean(),
+            null
+        );
+        assertThat(failureStoreDataStream.isFailureStoreIndex(writeFailureIndex.getName()), is(true));
+        assertThat(
+            failureStoreDataStream.isFailureStoreIndex(failureIndices.get(randomIntBetween(0, failureIndices.size() - 1)).getName()),
+            is(true)
+        );
+        assertThat(
+            failureStoreDataStreamWithEmptyFailureIndices.isFailureStoreIndex(
+                backingIndices.get(randomIntBetween(0, backingIndices.size() - 1)).getName()
+            ),
+            is(false)
+        );
+        assertThat(failureStoreDataStreamWithEmptyFailureIndices.isFailureStoreIndex(randomAlphaOfLength(10)), is(false));
+    }
+
+    private record DataStreamMetadata(Long creationTimeInMillis, Long rolloverTimeInMillis, Long originationTimeInMillis) {
+        public static DataStreamMetadata dataStreamMetadata(Long creationTimeInMillis, Long rolloverTimeInMillis) {
+            return new DataStreamMetadata(creationTimeInMillis, rolloverTimeInMillis, null);
+        }
+
+        public static DataStreamMetadata dataStreamMetadata(
+            Long creationTimeInMillis,
+            Long rolloverTimeInMillis,
+            Long originationTimeInMillis
+        ) {
+            return new DataStreamMetadata(creationTimeInMillis, rolloverTimeInMillis, originationTimeInMillis);
         }
     }
 }

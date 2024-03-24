@@ -13,11 +13,12 @@ import org.elasticsearch.license.XPackLicenseState;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.RestResponse;
 import org.elasticsearch.rest.RestStatus;
+import org.elasticsearch.rest.Scope;
+import org.elasticsearch.rest.ServerlessScope;
 import org.elasticsearch.rest.action.RestBuilderListener;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xpack.core.security.action.role.DeleteRoleRequestBuilder;
 import org.elasticsearch.xpack.core.security.action.role.DeleteRoleResponse;
-import org.elasticsearch.xpack.security.rest.action.SecurityBaseRestHandler;
 
 import java.io.IOException;
 import java.util.List;
@@ -27,7 +28,8 @@ import static org.elasticsearch.rest.RestRequest.Method.DELETE;
 /**
  * Rest endpoint to delete a Role from the security index
  */
-public class RestDeleteRoleAction extends SecurityBaseRestHandler {
+@ServerlessScope(Scope.PUBLIC)
+public class RestDeleteRoleAction extends NativeRoleBaseRestHandler {
 
     public RestDeleteRoleAction(Settings settings, XPackLicenseState licenseState) {
         super(settings, licenseState);

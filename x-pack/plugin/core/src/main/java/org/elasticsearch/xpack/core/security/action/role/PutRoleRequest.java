@@ -6,6 +6,7 @@
  */
 package org.elasticsearch.xpack.core.security.action.role;
 
+import org.elasticsearch.TransportVersions;
 import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.support.WriteRequest;
@@ -53,13 +54,13 @@ public class PutRoleRequest extends ActionRequest implements WriteRequest<PutRol
         for (int i = 0; i < indicesSize; i++) {
             indicesPrivileges.add(new RoleDescriptor.IndicesPrivileges(in));
         }
-        applicationPrivileges = in.readList(RoleDescriptor.ApplicationResourcePrivileges::new);
+        applicationPrivileges = in.readCollectionAsList(RoleDescriptor.ApplicationResourcePrivileges::new);
         configurableClusterPrivileges = ConfigurableClusterPrivileges.readArray(in);
         runAs = in.readStringArray();
         refreshPolicy = RefreshPolicy.readFrom(in);
-        metadata = in.readMap();
-        if (in.getTransportVersion().onOrAfter(RoleDescriptor.TRANSPORT_VERSION_REMOTE_INDICES)) {
-            remoteIndicesPrivileges = in.readList(RoleDescriptor.RemoteIndicesPrivileges::new);
+        metadata = in.readGenericMap();
+        if (in.getTransportVersion().onOrAfter(TransportVersions.V_8_8_0)) {
+            remoteIndicesPrivileges = in.readCollectionAsList(RoleDescriptor.RemoteIndicesPrivileges::new);
         }
     }
 
@@ -208,17 +209,17 @@ public class PutRoleRequest extends ActionRequest implements WriteRequest<PutRol
         for (RoleDescriptor.IndicesPrivileges index : indicesPrivileges) {
             index.writeTo(out);
         }
-        out.writeList(applicationPrivileges);
+        out.writeCollection(applicationPrivileges);
         ConfigurableClusterPrivileges.writeArray(out, this.configurableClusterPrivileges);
         out.writeStringArray(runAs);
         refreshPolicy.writeTo(out);
         out.writeGenericMap(metadata);
-        if (out.getTransportVersion().onOrAfter(RoleDescriptor.TRANSPORT_VERSION_REMOTE_INDICES)) {
+        if (out.getTransportVersion().onOrAfter(TransportVersions.V_8_8_0)) {
             out.writeCollection(remoteIndicesPrivileges);
         } else if (hasRemoteIndicesPrivileges()) {
             throw new IllegalArgumentException(
                 "versions of Elasticsearch before ["
-                    + RoleDescriptor.TRANSPORT_VERSION_REMOTE_INDICES
+                    + TransportVersions.V_8_8_0
                     + "] can't handle remote indices privileges and attempted to send to ["
                     + out.getTransportVersion()
                     + "]"
@@ -236,7 +237,8 @@ public class PutRoleRequest extends ActionRequest implements WriteRequest<PutRol
             runAs,
             metadata,
             Collections.emptyMap(),
-            remoteIndicesPrivileges.toArray(new RoleDescriptor.RemoteIndicesPrivileges[0])
+            remoteIndicesPrivileges.toArray(new RoleDescriptor.RemoteIndicesPrivileges[0]),
+            null
         );
     }
 }

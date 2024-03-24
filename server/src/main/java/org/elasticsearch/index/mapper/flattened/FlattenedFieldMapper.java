@@ -11,6 +11,7 @@ package org.elasticsearch.index.mapper.flattened;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.ImpactsEnum;
 import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.IndexableField;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.MultiTerms;
 import org.apache.lucene.index.OrdinalMap;
@@ -72,7 +73,10 @@ import org.elasticsearch.search.sort.SortOrder;
 import org.elasticsearch.xcontent.XContentParser;
 
 import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * A field mapper that accepts a JSON object and flattens it into a single field. This data type
@@ -96,13 +100,14 @@ import java.util.Map;
  *
  * the mapper will produce untokenized string fields with the name "field" and values
  * "some value" and "true", as well as string fields called "field._keyed" with values
- * "key\0some value" and "key2.key3\0true". Note that \0 is used as a reserved separator
+ * "key1\0some value" and "key2.key3\0true". Note that \0 is used as a reserved separator
  *  character (see {@link FlattenedFieldParser#SEPARATOR}).
  */
 public final class FlattenedFieldMapper extends FieldMapper {
 
     public static final String CONTENT_TYPE = "flattened";
-    private static final String KEYED_FIELD_SUFFIX = "._keyed";
+    public static final String KEYED_FIELD_SUFFIX = "._keyed";
+    public static final String TIME_SERIES_DIMENSIONS_ARRAY_PARAM = "time_series_dimensions";
 
     private static class Defaults {
         public static final int DEPTH_LIMIT = 20;
@@ -153,8 +158,25 @@ public final class FlattenedFieldMapper extends FieldMapper {
             m -> builder(m).splitQueriesOnWhitespace.get(),
             false
         );
+        private final Parameter<List<String>> dimensions = dimensionsParam(m -> builder(m).dimensions.get()).addValidator(v -> {
+            if (v.isEmpty() == false && (indexed.getValue() == false || hasDocValues.getValue() == false)) {
+                throw new IllegalArgumentException(
+                    "Field ["
+                        + TIME_SERIES_DIMENSIONS_ARRAY_PARAM
+                        + "] requires that ["
+                        + indexed.name
+                        + "] and ["
+                        + hasDocValues.name
+                        + "] are true"
+                );
+            }
+        }).precludesParameters(ignoreAbove);
 
         private final Parameter<Map<String, String>> meta = Parameter.metaParam();
+
+        public static FieldMapper.Parameter<List<String>> dimensionsParam(Function<FieldMapper, List<String>> initializer) {
+            return FieldMapper.Parameter.stringArrayParam(TIME_SERIES_DIMENSIONS_ARRAY_PARAM, false, initializer);
+        }
 
         public Builder(String name) {
             super(name);
@@ -172,28 +194,29 @@ public final class FlattenedFieldMapper extends FieldMapper {
                 indexOptions,
                 similarity,
                 splitQueriesOnWhitespace,
-                meta };
+                meta,
+                dimensions };
         }
 
         @Override
         public FlattenedFieldMapper build(MapperBuilderContext context) {
             MultiFields multiFields = multiFieldsBuilder.build(this, context);
             if (multiFields.iterator().hasNext()) {
-                throw new IllegalArgumentException(CONTENT_TYPE + " field [" + name + "] does not support [fields]");
+                throw new IllegalArgumentException(CONTENT_TYPE + " field [" + name() + "] does not support [fields]");
             }
-            CopyTo copyTo = this.copyTo.build();
             if (copyTo.copyToFields().isEmpty() == false) {
-                throw new IllegalArgumentException(CONTENT_TYPE + " field [" + name + "] does not support [copy_to]");
+                throw new IllegalArgumentException(CONTENT_TYPE + " field [" + name() + "] does not support [copy_to]");
             }
             MappedFieldType ft = new RootFlattenedFieldType(
-                context.buildFullName(name),
+                context.buildFullName(name()),
                 indexed.get(),
                 hasDocValues.get(),
                 meta.get(),
                 splitQueriesOnWhitespace.get(),
-                eagerGlobalOrdinals.get()
+                eagerGlobalOrdinals.get(),
+                dimensions.get()
             );
-            return new FlattenedFieldMapper(name, ft, this);
+            return new FlattenedFieldMapper(name(), ft, this);
         }
     }
 
@@ -206,6 +229,12 @@ public final class FlattenedFieldMapper extends FieldMapper {
     public static final class KeyedFlattenedFieldType extends StringFieldType {
         private final String key;
         private final String rootName;
+        private final boolean isDimension;
+
+        @Override
+        public boolean isDimension() {
+            return isDimension;
+        }
 
         KeyedFlattenedFieldType(
             String rootName,
@@ -213,7 +242,8 @@ public final class FlattenedFieldMapper extends FieldMapper {
             boolean hasDocValues,
             String key,
             boolean splitQueriesOnWhitespace,
-            Map<String, String> meta
+            Map<String, String> meta,
+            boolean isDimension
         ) {
             super(
                 rootName + KEYED_FIELD_SUFFIX,
@@ -225,10 +255,19 @@ public final class FlattenedFieldMapper extends FieldMapper {
             );
             this.key = key;
             this.rootName = rootName;
+            this.isDimension = isDimension;
         }
 
         private KeyedFlattenedFieldType(String rootName, String key, RootFlattenedFieldType ref) {
-            this(rootName, ref.isIndexed(), ref.hasDocValues(), key, ref.splitQueriesOnWhitespace, ref.meta());
+            this(
+                rootName,
+                ref.isIndexed(),
+                ref.hasDocValues(),
+                key,
+                ref.splitQueriesOnWhitespace,
+                ref.meta(),
+                ref.dimensions.contains(key)
+            );
         }
 
         @Override
@@ -328,7 +367,8 @@ public final class FlattenedFieldMapper extends FieldMapper {
                 a = Operations.concatenate(a, Automata.makeString(prefix));
                 a = Operations.concatenate(a, Automata.makeAnyString());
             }
-            a = MinimizationOperations.minimize(a, Integer.MAX_VALUE);
+            assert a.isDeterministic();
+            a = MinimizationOperations.minimize(a, 0);
 
             CompiledAutomaton automaton = new CompiledAutomaton(a);
             if (searchAfter != null) {
@@ -596,6 +636,8 @@ public final class FlattenedFieldMapper extends FieldMapper {
     public static final class RootFlattenedFieldType extends StringFieldType implements DynamicFieldType {
         private final boolean splitQueriesOnWhitespace;
         private final boolean eagerGlobalOrdinals;
+        private final List<String> dimensions;
+        private final boolean isDimension;
 
         public RootFlattenedFieldType(
             String name,
@@ -604,6 +646,18 @@ public final class FlattenedFieldMapper extends FieldMapper {
             Map<String, String> meta,
             boolean splitQueriesOnWhitespace,
             boolean eagerGlobalOrdinals
+        ) {
+            this(name, indexed, hasDocValues, meta, splitQueriesOnWhitespace, eagerGlobalOrdinals, Collections.emptyList());
+        }
+
+        public RootFlattenedFieldType(
+            String name,
+            boolean indexed,
+            boolean hasDocValues,
+            Map<String, String> meta,
+            boolean splitQueriesOnWhitespace,
+            boolean eagerGlobalOrdinals,
+            List<String> dimensions
         ) {
             super(
                 name,
@@ -615,6 +669,8 @@ public final class FlattenedFieldMapper extends FieldMapper {
             );
             this.splitQueriesOnWhitespace = splitQueriesOnWhitespace;
             this.eagerGlobalOrdinals = eagerGlobalOrdinals;
+            this.dimensions = dimensions;
+            this.isDimension = dimensions.isEmpty() == false;
         }
 
         @Override
@@ -625,11 +681,6 @@ public final class FlattenedFieldMapper extends FieldMapper {
         @Override
         public boolean eagerGlobalOrdinals() {
             return eagerGlobalOrdinals;
-        }
-
-        @Override
-        public boolean mayExistInIndex(SearchExecutionContext context) {
-            return context.fieldExistsInIndex(name());
         }
 
         @Override
@@ -659,6 +710,23 @@ public final class FlattenedFieldMapper extends FieldMapper {
         @Override
         public MappedFieldType getChildFieldType(String childPath) {
             return new KeyedFlattenedFieldType(name(), childPath, this);
+        }
+
+        @Override
+        public boolean isDimension() {
+            return isDimension;
+        }
+
+        @Override
+        public List<String> dimensions() {
+            return this.dimensions;
+        }
+
+        @Override
+        public void validateMatchedRoutingPath(final String routingPath) {
+            if (this.dimensions.contains(routingPath) == false) {
+                super.validateMatchedRoutingPath(routingPath);
+            }
         }
     }
 
@@ -702,6 +770,11 @@ public final class FlattenedFieldMapper extends FieldMapper {
     }
 
     @Override
+    protected boolean supportsParsingObject() {
+        return true;
+    }
+
+    @Override
     protected void parseCreateField(DocumentParserContext context) throws IOException {
         if (context.parser().currentToken() == XContentParser.Token.VALUE_NULL) {
             return;
@@ -712,11 +785,11 @@ public final class FlattenedFieldMapper extends FieldMapper {
             return;
         }
 
-        XContentParser xContentParser = context.parser();
         try {
             // make sure that we don't expand dots in field names while parsing
             context.path().setWithinLeafObject(true);
-            context.doc().addAll(fieldParser.parse(xContentParser));
+            List<IndexableField> fields = fieldParser.parse(context);
+            context.doc().addAll(fields);
         } finally {
             context.path().setWithinLeafObject(false);
         }

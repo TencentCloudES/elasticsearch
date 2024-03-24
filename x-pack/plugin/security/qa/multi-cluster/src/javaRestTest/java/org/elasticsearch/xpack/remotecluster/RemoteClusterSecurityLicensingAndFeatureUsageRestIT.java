@@ -18,6 +18,7 @@ import org.elasticsearch.client.RestClient;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.Strings;
 import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.search.SearchResponseUtils;
 import org.elasticsearch.test.cluster.ElasticsearchCluster;
 import org.elasticsearch.test.rest.ObjectPath;
 import org.junit.ClassRule;
@@ -46,14 +47,14 @@ public class RemoteClusterSecurityLicensingAndFeatureUsageRestIT extends Abstrac
     private static final AtomicReference<Map<String, Object>> API_KEY_MAP_REF = new AtomicReference<>();
 
     private static final String REMOTE_INDEX_NAME = "remote_index";
-    public static final String CONFIGURABLE_CROSS_CLUSTER_ACCESS_FEATURE_NAME = "configurable-cross-cluster-access";
+    public static final String ADVANCED_REMOTE_CLUSTER_SECURITY_FEATURE_NAME = "advanced-remote-cluster-security";
 
     static {
         fulfillingCluster = ElasticsearchCluster.local()
             .name("fulfilling-cluster")
             .nodes(1)
             .apply(commonClusterConfig)
-            .setting("xpack.license.self_generated.type", "basic")
+            .setting("xpack.license.self_generated.type", "trial")
             .setting("remote_cluster_server.enabled", "true")
             .setting("remote_cluster.port", "0")
             .setting("xpack.security.remote_cluster_server.ssl.enabled", "true")
@@ -73,15 +74,11 @@ public class RemoteClusterSecurityLicensingAndFeatureUsageRestIT extends Abstrac
                 if (API_KEY_MAP_REF.get() == null) {
                     final Map<String, Object> apiKeyMap = createCrossClusterAccessApiKey(Strings.format("""
                         {
-                          "role": {
-                            "cluster": ["cross_cluster_access"],
-                            "index": [
+                            "search": [
                               {
-                                  "names": ["%s"],
-                                  "privileges": ["read", "read_cross_cluster"]
+                                  "names": ["%s"]
                               }
                             ]
-                          }
                         }""", REMOTE_INDEX_NAME));
                     API_KEY_MAP_REF.set(apiKeyMap);
                 }
@@ -117,7 +114,6 @@ public class RemoteClusterSecurityLicensingAndFeatureUsageRestIT extends Abstrac
     }
 
     public void testCrossClusterAccessFeatureTrackingAndLicensing() throws Exception {
-        assertBasicLicense(fulfillingClusterClient);
         assertBasicLicense(client());
 
         final boolean useProxyMode = randomBoolean();
@@ -168,17 +164,9 @@ public class RemoteClusterSecurityLicensingAndFeatureUsageRestIT extends Abstrac
             );
 
             // Check that CCS fails because we cannot establish connection due to the license check.
-            if (useProxyMode) {
-                // TODO: We should improve error handling so we get actual cause instead just NoSeedNodeLeftException.
-                var exception = expectThrows(ResponseException.class, () -> performRequestWithRemoteSearchUser(searchRequest));
-                assertThat(exception.getResponse().getStatusLine().getStatusCode(), equalTo(500));
-                assertThat(exception.getMessage(), containsString("Unable to open any proxy connections to cluster [my_remote_cluster]"));
-            } else {
-                assertRequestFailsDueToUnsupportedLicense(() -> performRequestWithRemoteSearchUser(searchRequest));
-            }
+            assertRequestFailsDueToUnsupportedLicense(() -> performRequestWithRemoteSearchUser(searchRequest));
 
             // We start the trial license which supports all features.
-            startTrialLicense(fulfillingClusterClient);
             startTrialLicense(client());
 
             // Check that feature is not tracked before we send CCS request.
@@ -188,8 +176,12 @@ public class RemoteClusterSecurityLicensingAndFeatureUsageRestIT extends Abstrac
             // Check that we can search the fulfilling cluster from the querying cluster after license upgrade to trial.
             final Response response = performRequestWithRemoteSearchUser(searchRequest);
             assertOK(response);
-            final SearchResponse searchResponse = SearchResponse.fromXContent(responseAsParser(response));
-            assertSearchResultContainsIndices(searchResponse, REMOTE_INDEX_NAME);
+            final SearchResponse searchResponse = SearchResponseUtils.parseSearchResponse(responseAsParser(response));
+            try {
+                assertSearchResultContainsIndices(searchResponse, REMOTE_INDEX_NAME);
+            } finally {
+                searchResponse.decRef();
+            }
 
             // Check that the feature is tracked on both QC and FC.
             assertFeatureTracked(client());
@@ -230,7 +222,7 @@ public class RemoteClusterSecurityLicensingAndFeatureUsageRestIT extends Abstrac
         assertThat(exception.getResponse().getStatusLine().getStatusCode(), equalTo(403));
         assertThat(
             exception.getMessage(),
-            containsString("current license is non-compliant for [" + CONFIGURABLE_CROSS_CLUSTER_ACCESS_FEATURE_NAME + "]")
+            containsString("current license is non-compliant for [" + ADVANCED_REMOTE_CLUSTER_SECURITY_FEATURE_NAME + "]")
         );
     }
 
@@ -269,12 +261,12 @@ public class RemoteClusterSecurityLicensingAndFeatureUsageRestIT extends Abstrac
 
     private static void assertFeatureTracked(RestClient client) throws IOException {
         Set<String> features = fetchFeatureUsageFromNode(client);
-        assertThat(CONFIGURABLE_CROSS_CLUSTER_ACCESS_FEATURE_NAME, is(in(features)));
+        assertThat(ADVANCED_REMOTE_CLUSTER_SECURITY_FEATURE_NAME, is(in(features)));
     }
 
     private static void assertFeatureNotTracked(RestClient client) throws IOException {
         Set<String> features = fetchFeatureUsageFromNode(client);
-        assertThat(CONFIGURABLE_CROSS_CLUSTER_ACCESS_FEATURE_NAME, not(is(in(features))));
+        assertThat(ADVANCED_REMOTE_CLUSTER_SECURITY_FEATURE_NAME, not(is(in(features))));
     }
 
     private static Set<String> fetchFeatureUsageFromNode(RestClient client) throws IOException {

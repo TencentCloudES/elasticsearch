@@ -14,7 +14,6 @@ import com.azure.storage.blob.BlobContainerClient;
 import com.azure.storage.blob.BlobServiceClient;
 import com.azure.storage.blob.models.BlobStorageException;
 
-import org.apache.lucene.tests.util.LuceneTestCase;
 import org.elasticsearch.action.ActionRunnable;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.action.support.master.AcknowledgedResponse;
@@ -36,13 +35,13 @@ import java.io.ByteArrayInputStream;
 import java.net.HttpURLConnection;
 import java.util.Collection;
 
+import static org.elasticsearch.repositories.blobstore.BlobStoreTestUtil.randomPurpose;
 import static org.hamcrest.Matchers.blankOrNullString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
-@LuceneTestCase.AwaitsFix(bugUrl = "https://github.com/elastic/elasticsearch/issues/95134")
 public class AzureStorageCleanupThirdPartyTests extends AbstractThirdPartyRepositoryTestCase {
-    private static final boolean USE_FIXTURE = Booleans.parseBoolean(System.getProperty("azure_use_fixture", "true"));
+    private static final boolean USE_FIXTURE = Booleans.parseBoolean(System.getProperty("test.azure.fixture", "true"));
 
     @ClassRule
     public static AzureHttpFixture fixture = new AzureHttpFixture(
@@ -89,9 +88,7 @@ public class AzureStorageCleanupThirdPartyTests extends AbstractThirdPartyReposi
 
     @Override
     protected void createRepository(String repoName) {
-        AcknowledgedResponse putRepositoryResponse = client().admin()
-            .cluster()
-            .preparePutRepository(repoName)
+        AcknowledgedResponse putRepositoryResponse = clusterAdmin().preparePutRepository(repoName)
             .setType("azure")
             .setSettings(
                 Settings.builder()
@@ -108,7 +105,7 @@ public class AzureStorageCleanupThirdPartyTests extends AbstractThirdPartyReposi
 
     private void ensureSasTokenPermissions() {
         final BlobStoreRepository repository = getRepository();
-        final PlainActionFuture<Void> future = PlainActionFuture.newFuture();
+        final PlainActionFuture<Void> future = new PlainActionFuture<>();
         repository.threadPool().generic().execute(ActionRunnable.wrap(future, l -> {
             final AzureBlobStore blobStore = (AzureBlobStore) repository.blobStore();
             final AzureBlobServiceClient azureBlobServiceClient = blobStore.getService().client("default", LocationMode.PRIMARY_ONLY);
@@ -139,11 +136,17 @@ public class AzureStorageCleanupThirdPartyTests extends AbstractThirdPartyReposi
         final BlobStoreRepository repo = getRepository();
         // The configured threshold for this test suite is 1mb
         final int blobSize = ByteSizeUnit.MB.toIntBytes(2);
-        PlainActionFuture<Void> future = PlainActionFuture.newFuture();
+        PlainActionFuture<Void> future = new PlainActionFuture<>();
         repo.threadPool().generic().execute(ActionRunnable.run(future, () -> {
             final BlobContainer blobContainer = repo.blobStore().blobContainer(repo.basePath().add("large_write"));
-            blobContainer.writeBlob(UUIDs.base64UUID(), new ByteArrayInputStream(randomByteArrayOfLength(blobSize)), blobSize, false);
-            blobContainer.delete();
+            blobContainer.writeBlob(
+                randomPurpose(),
+                UUIDs.base64UUID(),
+                new ByteArrayInputStream(randomByteArrayOfLength(blobSize)),
+                blobSize,
+                false
+            );
+            blobContainer.delete(randomPurpose());
         }));
         future.get();
     }

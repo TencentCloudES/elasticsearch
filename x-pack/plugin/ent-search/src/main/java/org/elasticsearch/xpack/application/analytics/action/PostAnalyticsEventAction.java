@@ -15,31 +15,35 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.xcontent.StatusToXContentObject;
+import org.elasticsearch.common.network.NetworkAddress;
 import org.elasticsearch.common.xcontent.XContentHelper;
-import org.elasticsearch.rest.RestStatus;
+import org.elasticsearch.core.Nullable;
+import org.elasticsearch.xcontent.ConstructingObjectParser;
 import org.elasticsearch.xcontent.ParseField;
+import org.elasticsearch.xcontent.ToXContentObject;
 import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentType;
 import org.elasticsearch.xpack.application.analytics.event.AnalyticsEvent;
 
 import java.io.IOException;
+import java.net.InetAddress;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 
 import static org.elasticsearch.action.ValidateActions.addValidationError;
+import static org.elasticsearch.xcontent.ConstructingObjectParser.constructorArg;
 
-public class PostAnalyticsEventAction extends ActionType<PostAnalyticsEventAction.Response> {
-
-    public static final PostAnalyticsEventAction INSTANCE = new PostAnalyticsEventAction();
+public class PostAnalyticsEventAction {
 
     public static final String NAME = "cluster:admin/xpack/application/analytics/post_event";
+    public static final ActionType<PostAnalyticsEventAction.Response> INSTANCE = new ActionType<>(NAME);
 
-    private PostAnalyticsEventAction() {
-        super(NAME, Response::readFromStreamInput);
-    }
+    private PostAnalyticsEventAction() {/* no instances */}
 
-    public static class Request extends ActionRequest implements AnalyticsEvent.Context {
+    public static class Request extends ActionRequest implements AnalyticsEvent.Context, ToXContentObject {
 
         private final String eventCollectionName;
 
@@ -53,17 +57,19 @@ public class PostAnalyticsEventAction extends ActionType<PostAnalyticsEventActio
 
         private final XContentType xContentType;
 
-        public Request(String eventCollectionName, String eventType, boolean debug, XContentType xContentType, BytesReference payload) {
-            this(eventCollectionName, eventType, debug, System.currentTimeMillis(), xContentType, payload);
-        }
+        private final Map<String, List<String>> headers;
 
-        public Request(
+        private final String clientAddress;
+
+        private Request(
             String eventCollectionName,
             String eventType,
-            boolean debug,
             long eventTime,
             XContentType xContentType,
-            BytesReference payload
+            BytesReference payload,
+            boolean debug,
+            @Nullable Map<String, List<String>> headers,
+            @Nullable String clientAddress
         ) {
             this.eventCollectionName = eventCollectionName;
             this.eventType = eventType;
@@ -71,6 +77,8 @@ public class PostAnalyticsEventAction extends ActionType<PostAnalyticsEventActio
             this.eventTime = eventTime;
             this.xContentType = xContentType;
             this.payload = payload;
+            this.headers = Objects.requireNonNullElse(headers, Map.of());
+            this.clientAddress = clientAddress;
         }
 
         public Request(StreamInput in) throws IOException {
@@ -81,30 +89,63 @@ public class PostAnalyticsEventAction extends ActionType<PostAnalyticsEventActio
             this.eventTime = in.readLong();
             this.xContentType = in.readEnum(XContentType.class);
             this.payload = in.readBytesReference();
+            this.headers = in.readMap(StreamInput::readStringCollectionAsList);
+            this.clientAddress = in.readOptionalString();
         }
 
+        public static RequestBuilder builder(
+            String eventCollectionName,
+            String eventType,
+            XContentType xContentType,
+            BytesReference payload
+        ) {
+            return new RequestBuilder(eventCollectionName, eventType, xContentType, payload);
+        }
+
+        @Override
         public String eventCollectionName() {
             return eventCollectionName;
         }
 
+        @Override
         public AnalyticsEvent.Type eventType() {
             return AnalyticsEvent.Type.valueOf(eventType.toUpperCase(Locale.ROOT));
         }
 
+        @Override
         public long eventTime() {
             return eventTime;
+        }
+
+        @Override
+        public String userAgent() {
+            return header("User-Agent");
+        }
+
+        @Override
+        public String clientAddress() {
+            return clientAddress;
         }
 
         public BytesReference payload() {
             return payload;
         }
 
+        public XContentType xContentType() {
+            return xContentType;
+        }
+
         public boolean isDebug() {
             return debug;
         }
 
-        public XContentType xContentType() {
-            return xContentType;
+        private String header(String header) {
+            final List<String> values = headers.get(header);
+            if (values != null && values.isEmpty() == false) {
+                return values.get(0);
+            }
+
+            return null;
         }
 
         @Override
@@ -141,6 +182,8 @@ public class PostAnalyticsEventAction extends ActionType<PostAnalyticsEventActio
             out.writeLong(eventTime);
             XContentHelper.writeTo(out, xContentType);
             out.writeBytesReference(payload);
+            out.writeMap(headers, StreamOutput::writeStringCollection);
+            out.writeOptionalString(clientAddress);
         }
 
         @Override
@@ -152,17 +195,122 @@ public class PostAnalyticsEventAction extends ActionType<PostAnalyticsEventActio
                 && debug == that.debug
                 && eventTime == that.eventTime
                 && Objects.equals(eventType, that.eventType)
-                && Objects.equals(xContentType, that.xContentType)
-                && Objects.equals(payload, that.payload);
+                && Objects.equals(xContentType.canonical(), that.xContentType.canonical())
+                && Objects.equals(payload, that.payload)
+                && Objects.equals(headers, that.headers)
+                && Objects.equals(clientAddress, that.clientAddress);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(eventCollectionName, eventType, debug, eventTime, xContentType, payload);
+            return Objects.hash(
+                eventCollectionName,
+                eventType,
+                debug,
+                eventTime,
+                xContentType.canonical(),
+                payload,
+                headers,
+                clientAddress
+            );
+        }
+
+        @Override
+        public String toString() {
+            return Strings.toString(this);
+        }
+
+        @Override
+        public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
+            builder.startObject();
+            builder.field("event_collection_name", eventCollectionName);
+            builder.field("debug", debug);
+            builder.field("event_time", eventTime);
+            builder.field("event_type", eventType);
+            builder.field("x_content_type", xContentType);
+            builder.field("payload", payload);
+            builder.field("headers", headers);
+            builder.field("client_address", clientAddress);
+            builder.endObject();
+            return builder;
         }
     }
 
-    public static class Response extends ActionResponse implements StatusToXContentObject {
+    public static class RequestBuilder {
+
+        private String eventCollectionName;
+
+        private String eventType;
+
+        private long eventTime = System.currentTimeMillis();
+
+        private boolean debug = false;
+
+        private BytesReference payload;
+
+        private XContentType xContentType;
+
+        private Map<String, List<String>> headers;
+
+        private String clientAddress;
+
+        private RequestBuilder(String eventCollectionName, String eventType, XContentType xContentType, BytesReference payload) {
+            this.eventCollectionName = eventCollectionName;
+            this.eventType = eventType;
+            this.xContentType = xContentType;
+            this.payload = payload;
+        }
+
+        public Request request() {
+            return new Request(eventCollectionName, eventType, eventTime, xContentType, payload, debug, headers, clientAddress);
+        }
+
+        public RequestBuilder eventCollectionName(String eventCollectionName) {
+            this.eventCollectionName = eventCollectionName;
+            return this;
+        }
+
+        public RequestBuilder eventType(String eventType) {
+            this.eventType = eventType;
+            return this;
+        }
+
+        public RequestBuilder eventTime(long eventTime) {
+            this.eventTime = eventTime;
+            return this;
+        }
+
+        public RequestBuilder debug(boolean debug) {
+            this.debug = debug;
+            return this;
+        }
+
+        public RequestBuilder payload(BytesReference payload) {
+            this.payload = payload;
+            return this;
+        }
+
+        public RequestBuilder xContentType(XContentType xContentType) {
+            this.xContentType = xContentType;
+            return this;
+        }
+
+        public RequestBuilder headers(Map<String, List<String>> headers) {
+            this.headers = headers;
+            return this;
+        }
+
+        public RequestBuilder clientAddress(InetAddress clientAddress) {
+            return clientAddress(NetworkAddress.format(clientAddress));
+        }
+
+        public RequestBuilder clientAddress(String clientAddress) {
+            this.clientAddress = clientAddress;
+            return this;
+        }
+    }
+
+    public static class Response extends ActionResponse implements ToXContentObject {
         public static Response ACCEPTED = new Response(true);
 
         public static Response readFromStreamInput(StreamInput in) throws IOException {
@@ -226,9 +374,18 @@ public class PostAnalyticsEventAction extends ActionType<PostAnalyticsEventActio
 
         }
 
-        @Override
-        public RestStatus status() {
-            return RestStatus.ACCEPTED;
+        private static final ConstructingObjectParser<Response, String> PARSER = new ConstructingObjectParser<>(
+            "post_analytics_event_response",
+            false,
+            (params) -> new Response((boolean) params[0])
+        );
+
+        static {
+            PARSER.declareBoolean(constructorArg(), Response.RESULT_FIELD);
+        }
+
+        public static Response parse(XContentParser parser) {
+            return PARSER.apply(parser, null);
         }
     }
 

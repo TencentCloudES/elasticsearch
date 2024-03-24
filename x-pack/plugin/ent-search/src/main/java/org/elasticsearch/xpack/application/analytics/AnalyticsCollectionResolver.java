@@ -24,6 +24,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static java.util.function.Predicate.not;
+import static org.elasticsearch.xpack.application.analytics.AnalyticsConstants.EVENT_DATA_STREAM_INDEX_PATTERN;
 
 /**
  * A service that allows the resolution of {@link AnalyticsCollection} by name.
@@ -82,7 +83,7 @@ public class AnalyticsCollectionResolver {
         List<String> dataStreams = indexNameExpressionResolver.dataStreamNames(
             state,
             IndicesOptions.lenientExpandOpen(),
-            AnalyticsTemplateRegistry.EVENT_DATA_STREAM_INDEX_PATTERN
+            EVENT_DATA_STREAM_INDEX_PATTERN
         );
 
         Map<String, AnalyticsCollection> collections = dataStreams.stream()
@@ -103,7 +104,7 @@ public class AnalyticsCollectionResolver {
         return new ArrayList<>(collections.values());
     }
 
-    private boolean matchExpression(String collectionName, String expression) {
+    private static boolean matchExpression(String collectionName, String expression) {
         if (Strings.isNullOrEmpty(expression)) {
             return false;
         }
@@ -119,7 +120,7 @@ public class AnalyticsCollectionResolver {
         return collectionName.equals(expression);
     }
 
-    private boolean matchAnyExpression(String collectionName, String... expressions) {
+    private static boolean matchAnyExpression(String collectionName, String... expressions) {
         if (expressions.length < 1) {
             return true;
         }
@@ -127,7 +128,7 @@ public class AnalyticsCollectionResolver {
         return Arrays.stream(expressions).anyMatch(expression -> matchExpression(collectionName, expression));
     }
 
-    private boolean matchAnyExpression(AnalyticsCollection collection, String... expressions) {
+    private static boolean matchAnyExpression(AnalyticsCollection collection, String... expressions) {
         return matchAnyExpression(collection.getName(), expressions);
     }
 }

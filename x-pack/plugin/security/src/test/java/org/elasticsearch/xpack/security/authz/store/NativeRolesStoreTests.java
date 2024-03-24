@@ -6,8 +6,11 @@
  */
 package org.elasticsearch.xpack.security.authz.store;
 
+import org.apache.logging.log4j.Logger;
+import org.elasticsearch.ElasticsearchParseException;
 import org.elasticsearch.ElasticsearchSecurityException;
-import org.elasticsearch.Version;
+import org.elasticsearch.TransportVersion;
+import org.elasticsearch.TransportVersions;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.client.internal.Client;
@@ -29,13 +32,14 @@ import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.index.Index;
+import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.license.MockLicenseState;
 import org.elasticsearch.license.TestUtils;
 import org.elasticsearch.license.XPackLicenseState;
 import org.elasticsearch.test.ESTestCase;
-import org.elasticsearch.test.VersionUtils;
+import org.elasticsearch.test.TransportVersionUtils;
 import org.elasticsearch.threadpool.TestThreadPool;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.xcontent.ToXContent;
@@ -45,12 +49,15 @@ import org.elasticsearch.xpack.core.security.action.role.PutRoleRequest;
 import org.elasticsearch.xpack.core.security.authz.RoleDescriptor;
 import org.elasticsearch.xpack.core.security.authz.RoleDescriptor.IndicesPrivileges;
 import org.elasticsearch.xpack.core.security.authz.RoleDescriptorTests;
+import org.elasticsearch.xpack.core.security.authz.RoleRestrictionTests;
 import org.elasticsearch.xpack.core.security.authz.privilege.ClusterPrivilegeResolver;
+import org.elasticsearch.xpack.core.security.authz.store.RoleRetrievalResult;
 import org.elasticsearch.xpack.security.support.SecurityIndexManager;
 import org.elasticsearch.xpack.security.support.SecuritySystemIndices;
 import org.elasticsearch.xpack.security.test.SecurityTestUtils;
 import org.junit.After;
 import org.junit.Before;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.io.IOException;
@@ -58,16 +65,22 @@ import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static org.elasticsearch.transport.RemoteClusterPortSettings.TRANSPORT_VERSION_ADVANCED_REMOTE_CLUSTER_SECURITY;
 import static org.elasticsearch.xpack.core.security.SecurityField.DOCUMENT_LEVEL_SECURITY_FEATURE;
 import static org.elasticsearch.xpack.security.support.SecuritySystemIndices.SECURITY_MAIN_ALIAS;
 import static org.hamcrest.Matchers.arrayContaining;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
+import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.nullValue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 public class NativeRolesStoreTests extends ESTestCase {
@@ -116,7 +129,8 @@ public class NativeRolesStoreTests extends ESTestCase {
             generateRandomStringArray(5, randomIntBetween(2, 8), true, true),
             RoleDescriptorTests.randomRoleDescriptorMetadata(ESTestCase.randomBoolean()),
             null,
-            RoleDescriptorTests.randomRemoteIndicesPrivileges(1, 2)
+            RoleDescriptorTests.randomRemoteIndicesPrivileges(1, 2),
+            null
         );
         assertFalse(flsRole.getTransientMetadata().containsKey("unlicensed_features"));
 
@@ -131,7 +145,8 @@ public class NativeRolesStoreTests extends ESTestCase {
             generateRandomStringArray(5, randomIntBetween(2, 8), true, true),
             RoleDescriptorTests.randomRoleDescriptorMetadata(ESTestCase.randomBoolean()),
             null,
-            RoleDescriptorTests.randomRemoteIndicesPrivileges(1, 2)
+            RoleDescriptorTests.randomRemoteIndicesPrivileges(1, 2),
+            null
         );
         assertFalse(dlsRole.getTransientMetadata().containsKey("unlicensed_features"));
 
@@ -151,7 +166,8 @@ public class NativeRolesStoreTests extends ESTestCase {
             generateRandomStringArray(5, randomIntBetween(2, 8), true, true),
             RoleDescriptorTests.randomRoleDescriptorMetadata(ESTestCase.randomBoolean()),
             null,
-            RoleDescriptorTests.randomRemoteIndicesPrivileges(1, 2)
+            RoleDescriptorTests.randomRemoteIndicesPrivileges(1, 2),
+            null
         );
         assertFalse(flsDlsRole.getTransientMetadata().containsKey("unlicensed_features"));
 
@@ -164,7 +180,8 @@ public class NativeRolesStoreTests extends ESTestCase {
             generateRandomStringArray(5, randomIntBetween(2, 8), false, true),
             RoleDescriptorTests.randomRoleDescriptorMetadata(ESTestCase.randomBoolean()),
             null,
-            RoleDescriptorTests.randomRemoteIndicesPrivileges(1, 2)
+            RoleDescriptorTests.randomRemoteIndicesPrivileges(1, 2),
+            null
         );
         assertFalse(noFlsDlsRole.getTransientMetadata().containsKey("unlicensed_features"));
 
@@ -232,13 +249,68 @@ public class NativeRolesStoreTests extends ESTestCase {
         assertThat(role, equalTo(noFlsDlsRole));
     }
 
+    public void testTransformingRoleWithRestrictionFails() throws IOException {
+        MockLicenseState licenseState = mock(MockLicenseState.class);
+        when(licenseState.isAllowed(DOCUMENT_LEVEL_SECURITY_FEATURE)).thenReturn(false);
+        RoleDescriptor roleWithRestriction = new RoleDescriptor(
+            "role_with_restriction",
+            randomSubsetOf(ClusterPrivilegeResolver.names()).toArray(String[]::new),
+            new IndicesPrivileges[] {
+                IndicesPrivileges.builder()
+                    .privileges("READ")
+                    .indices(generateRandomStringArray(5, randomIntBetween(3, 9), false, false))
+                    .grantedFields("*")
+                    .deniedFields(generateRandomStringArray(5, randomIntBetween(3, 9), false, false))
+                    .query(
+                        randomBoolean()
+                            ? "{ \"term\": { \""
+                                + randomAlphaOfLengthBetween(3, 24)
+                                + "\" : \""
+                                + randomAlphaOfLengthBetween(3, 24)
+                                + "\" }"
+                            : "{ \"match_all\": {} }"
+                    )
+                    .build() },
+            RoleDescriptorTests.randomApplicationPrivileges(),
+            RoleDescriptorTests.randomClusterPrivileges(),
+            generateRandomStringArray(5, randomIntBetween(2, 8), true, true),
+            RoleDescriptorTests.randomRoleDescriptorMetadata(ESTestCase.randomBoolean()),
+            null,
+            RoleDescriptorTests.randomRemoteIndicesPrivileges(1, 2),
+            RoleRestrictionTests.randomWorkflowsRestriction(1, 2)
+        );
+
+        XContentBuilder builder = roleWithRestriction.toXContent(
+            XContentBuilder.builder(XContentType.JSON.xContent()),
+            ToXContent.EMPTY_PARAMS
+        );
+
+        Logger mockedLogger = Mockito.mock(Logger.class);
+        BytesReference bytes = BytesReference.bytes(builder);
+        RoleDescriptor transformedRole = NativeRolesStore.transformRole(
+            RoleDescriptor.ROLE_TYPE + "-role_with_restriction",
+            bytes,
+            mockedLogger,
+            licenseState
+        );
+        assertThat(transformedRole, nullValue());
+        ArgumentCaptor<ElasticsearchParseException> exceptionCaptor = ArgumentCaptor.forClass(ElasticsearchParseException.class);
+        ArgumentCaptor<String> messageCaptor = ArgumentCaptor.forClass(String.class);
+        verify(mockedLogger).error(messageCaptor.capture(), exceptionCaptor.capture());
+        assertThat(messageCaptor.getValue(), containsString("error in the format of data for role [role_with_restriction]"));
+        assertThat(
+            exceptionCaptor.getValue().getMessage(),
+            containsString("failed to parse role [role_with_restriction]. unexpected field [restriction]")
+        );
+    }
+
     public void testPutOfRoleWithFlsDlsUnlicensed() throws IOException {
         final Client client = mock(Client.class);
-        final ClusterService clusterService = mockClusterServiceWithMinNodeVersion(Version.CURRENT);
+        final ClusterService clusterService = mockClusterServiceWithMinNodeVersion(TransportVersion.current());
         final XPackLicenseState licenseState = mock(XPackLicenseState.class);
         final AtomicBoolean methodCalled = new AtomicBoolean(false);
 
-        final SecuritySystemIndices systemIndices = new SecuritySystemIndices();
+        final SecuritySystemIndices systemIndices = new SecuritySystemIndices(clusterService.getSettings());
         systemIndices.init(client, clusterService);
         final SecurityIndexManager securityIndex = systemIndices.getMainIndexManager();
 
@@ -313,18 +385,20 @@ public class NativeRolesStoreTests extends ESTestCase {
 
     public void testPutRoleWithRemoteIndicesUnsupportedMinNodeVersion() {
         final Client client = mock(Client.class);
-        final Version versionBeforeRemoteIndices = VersionUtils.getPreviousVersion(Version.V_8_6_0);
-        final Version version = VersionUtils.randomVersionBetween(
-            random(),
-            versionBeforeRemoteIndices.minimumCompatibilityVersion(),
-            versionBeforeRemoteIndices
+        final TransportVersion transportVersionBeforeAdvancedRemoteClusterSecurity = TransportVersionUtils.getPreviousVersion(
+            TRANSPORT_VERSION_ADVANCED_REMOTE_CLUSTER_SECURITY
         );
-        final ClusterService clusterService = mockClusterServiceWithMinNodeVersion(version);
+        final TransportVersion minTransportVersion = TransportVersionUtils.randomVersionBetween(
+            random(),
+            TransportVersions.MINIMUM_COMPATIBLE,
+            transportVersionBeforeAdvancedRemoteClusterSecurity
+        );
+        final ClusterService clusterService = mockClusterServiceWithMinNodeVersion(minTransportVersion);
 
         final XPackLicenseState licenseState = mock(XPackLicenseState.class);
         final AtomicBoolean methodCalled = new AtomicBoolean(false);
 
-        final SecuritySystemIndices systemIndices = new SecuritySystemIndices();
+        final SecuritySystemIndices systemIndices = new SecuritySystemIndices(clusterService.getSettings());
         systemIndices.init(client, clusterService);
         final SecurityIndexManager securityIndex = systemIndices.getMainIndexManager();
 
@@ -352,17 +426,46 @@ public class NativeRolesStoreTests extends ESTestCase {
             null,
             null,
             new RoleDescriptor.RemoteIndicesPrivileges[] {
-                RoleDescriptor.RemoteIndicesPrivileges.builder("remote").privileges("read").indices("index").build() }
+                RoleDescriptor.RemoteIndicesPrivileges.builder("remote").privileges("read").indices("index").build() },
+            null
         );
         PlainActionFuture<Boolean> future = new PlainActionFuture<>();
         rolesStore.putRole(putRoleRequest, remoteIndicesRole, future);
         IllegalStateException e = expectThrows(IllegalStateException.class, future::actionGet);
-        assertThat(e.getMessage(), containsString("all nodes must have version [8.6.0] or higher to support remote indices privileges"));
+        assertThat(
+            e.getMessage(),
+            containsString(
+                "all nodes must have transport version ["
+                    + TRANSPORT_VERSION_ADVANCED_REMOTE_CLUSTER_SECURITY
+                    + "] or higher to support remote indices privileges"
+            )
+        );
     }
 
-    private ClusterService mockClusterServiceWithMinNodeVersion(Version version) {
+    public void testGetRoleWhenDisabled() throws Exception {
+        final Settings settings = Settings.builder().put(NativeRolesStore.NATIVE_ROLES_ENABLED, "false").build();
+        final Client client = mock(Client.class);
+        final ClusterService clusterService = mock(ClusterService.class);
+        final XPackLicenseState licenseState = mock(XPackLicenseState.class);
+        final SecuritySystemIndices systemIndices = new SecuritySystemIndices(settings);
+        systemIndices.init(client, clusterService);
+        final SecurityIndexManager securityIndex = systemIndices.getMainIndexManager();
+
+        final NativeRolesStore store = new NativeRolesStore(settings, client, licenseState, securityIndex, clusterService);
+
+        final PlainActionFuture<RoleRetrievalResult> future = new PlainActionFuture<>();
+        store.getRoleDescriptors(Set.of(randomAlphaOfLengthBetween(4, 12)), future);
+
+        assertThat(future.get().isSuccess(), is(true));
+        assertThat(future.get().getDescriptors(), empty());
+
+        Mockito.verifyNoInteractions(client);
+    }
+
+    private ClusterService mockClusterServiceWithMinNodeVersion(TransportVersion transportVersion) {
         final ClusterService clusterService = mock(ClusterService.class, Mockito.RETURNS_DEEP_STUBS);
-        when(clusterService.state().nodes().getMinNodeVersion()).thenReturn(version);
+        when(clusterService.state().getMinTransportVersion()).thenReturn(transportVersion);
+        when(clusterService.getSettings()).thenReturn(Settings.EMPTY);
         return clusterService;
     }
 
@@ -371,7 +474,7 @@ public class NativeRolesStoreTests extends ESTestCase {
         final String securityIndexName = SECURITY_MAIN_ALIAS + (withAlias ? "-" + randomAlphaOfLength(5) : "");
 
         Metadata metadata = Metadata.builder()
-            .put(IndexMetadata.builder(securityIndexName).settings(indexSettings(Version.CURRENT, 1, 0)))
+            .put(IndexMetadata.builder(securityIndexName).settings(indexSettings(IndexVersion.current(), 1, 0)))
             .build();
 
         if (withAlias) {

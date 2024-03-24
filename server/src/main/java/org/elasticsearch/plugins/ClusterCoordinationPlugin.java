@@ -11,9 +11,11 @@ package org.elasticsearch.plugins;
 import org.elasticsearch.cluster.ClusterState;
 import org.elasticsearch.cluster.coordination.CoordinationState;
 import org.elasticsearch.cluster.coordination.ElectionStrategy;
+import org.elasticsearch.cluster.coordination.LeaderHeartbeatService;
 import org.elasticsearch.cluster.coordination.PreVoteCollector;
 import org.elasticsearch.cluster.coordination.Reconfigurator;
 import org.elasticsearch.cluster.node.DiscoveryNode;
+import org.elasticsearch.cluster.version.CompatibilityVersions;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.env.NodeEnvironment;
@@ -62,6 +64,10 @@ public interface ClusterCoordinationPlugin {
         return Optional.empty();
     }
 
+    default Optional<LeaderHeartbeatService> getLeaderHeartbeatService(Settings settings) {
+        return Optional.empty();
+    }
+
     interface PersistedStateFactory {
         CoordinationState.PersistedState createPersistedState(
             Settings settings,
@@ -75,7 +81,8 @@ public interface ClusterCoordinationPlugin {
             NodeEnvironment nodeEnvironment,
             NamedXContentRegistry xContentRegistry,
             ClusterSettings clusterSettings,
-            ThreadPool threadPool
+            ThreadPool threadPool,
+            CompatibilityVersions compatibilityVersions
         );
     }
 

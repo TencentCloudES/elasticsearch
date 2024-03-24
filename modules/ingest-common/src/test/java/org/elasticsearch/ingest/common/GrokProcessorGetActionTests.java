@@ -14,7 +14,9 @@ import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.xcontent.XContentHelper;
+import org.elasticsearch.grok.PatternBank;
 import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.test.MockUtils;
 import org.elasticsearch.transport.TransportService;
 import org.elasticsearch.xcontent.ToXContent;
 import org.elasticsearch.xcontent.XContentBuilder;
@@ -34,8 +36,8 @@ import static org.hamcrest.Matchers.sameInstance;
 import static org.mockito.Mockito.mock;
 
 public class GrokProcessorGetActionTests extends ESTestCase {
-    private static final Map<String, String> LEGACY_TEST_PATTERNS = Map.of("PATTERN2", "foo2", "PATTERN1", "foo1");
-    private static final Map<String, String> ECS_TEST_PATTERNS = Map.of("ECS_PATTERN2", "foo2", "ECS_PATTERN1", "foo1");
+    private static final PatternBank LEGACY_TEST_PATTERNS = new PatternBank(Map.of("PATTERN2", "foo2", "PATTERN1", "foo1"));
+    private static final PatternBank ECS_TEST_PATTERNS = new PatternBank(Map.of("ECS_PATTERN2", "foo2", "ECS_PATTERN1", "foo1"));
 
     public void testRequest() throws Exception {
         GrokProcessorGetAction.Request request = new GrokProcessorGetAction.Request(false, GrokProcessor.DEFAULT_ECS_COMPATIBILITY_MODE);
@@ -47,20 +49,21 @@ public class GrokProcessorGetActionTests extends ESTestCase {
     }
 
     public void testResponseSerialization() throws Exception {
-        GrokProcessorGetAction.Response response = new GrokProcessorGetAction.Response(LEGACY_TEST_PATTERNS);
+        GrokProcessorGetAction.Response response = new GrokProcessorGetAction.Response(LEGACY_TEST_PATTERNS.bank());
         BytesStreamOutput out = new BytesStreamOutput();
         response.writeTo(out);
         StreamInput streamInput = out.bytes().streamInput();
         GrokProcessorGetAction.Response otherResponse = new GrokProcessorGetAction.Response(streamInput);
-        assertThat(response.getGrokPatterns(), equalTo(LEGACY_TEST_PATTERNS));
+        assertThat(response.getGrokPatterns(), equalTo(LEGACY_TEST_PATTERNS.bank()));
         assertThat(response.getGrokPatterns(), equalTo(otherResponse.getGrokPatterns()));
     }
 
     public void testResponseSorting() {
-        List<String> sortedKeys = new ArrayList<>(LEGACY_TEST_PATTERNS.keySet());
+        List<String> sortedKeys = new ArrayList<>(LEGACY_TEST_PATTERNS.bank().keySet());
         Collections.sort(sortedKeys);
+        TransportService transportService = MockUtils.setupTransportServiceWithThreadpoolExecutor();
         GrokProcessorGetAction.TransportAction transportAction = new GrokProcessorGetAction.TransportAction(
-            mock(TransportService.class),
+            transportService,
             mock(ActionFilters.class),
             LEGACY_TEST_PATTERNS,
             ECS_TEST_PATTERNS
@@ -106,10 +109,11 @@ public class GrokProcessorGetActionTests extends ESTestCase {
     }
 
     public void testEcsCompatibilityMode() {
-        List<String> sortedKeys = new ArrayList<>(ECS_TEST_PATTERNS.keySet());
+        List<String> sortedKeys = new ArrayList<>(ECS_TEST_PATTERNS.bank().keySet());
         Collections.sort(sortedKeys);
+        TransportService transportService = MockUtils.setupTransportServiceWithThreadpoolExecutor();
         GrokProcessorGetAction.TransportAction transportAction = new GrokProcessorGetAction.TransportAction(
-            mock(TransportService.class),
+            transportService,
             mock(ActionFilters.class),
             LEGACY_TEST_PATTERNS,
             ECS_TEST_PATTERNS
@@ -132,7 +136,7 @@ public class GrokProcessorGetActionTests extends ESTestCase {
 
     @SuppressWarnings("unchecked")
     public void testResponseToXContent() throws Exception {
-        GrokProcessorGetAction.Response response = new GrokProcessorGetAction.Response(LEGACY_TEST_PATTERNS);
+        GrokProcessorGetAction.Response response = new GrokProcessorGetAction.Response(LEGACY_TEST_PATTERNS.bank());
         try (XContentBuilder builder = JsonXContent.contentBuilder()) {
             response.toXContent(builder, ToXContent.EMPTY_PARAMS);
             Map<String, Object> converted = XContentHelper.convertToMap(BytesReference.bytes(builder), false, builder.contentType()).v2();

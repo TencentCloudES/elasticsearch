@@ -7,6 +7,7 @@
 package org.elasticsearch.xpack.core.security.action.role;
 
 import org.elasticsearch.TransportVersion;
+import org.elasticsearch.TransportVersions;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.support.WriteRequest;
 import org.elasticsearch.common.Strings;
@@ -24,7 +25,9 @@ import org.elasticsearch.xpack.core.security.authz.RoleDescriptor;
 import org.elasticsearch.xpack.core.security.authz.RoleDescriptor.ApplicationResourcePrivileges;
 import org.elasticsearch.xpack.core.security.authz.privilege.ConfigurableClusterPrivilege;
 import org.elasticsearch.xpack.core.security.authz.privilege.ConfigurableClusterPrivileges;
+import org.elasticsearch.xpack.core.security.authz.store.ReservedRolesStore;
 import org.elasticsearch.xpack.core.security.support.NativeRealmValidationUtil;
+import org.junit.BeforeClass;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -40,6 +43,13 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
 public class PutRoleRequestTests extends ESTestCase {
+
+    @BeforeClass
+    public static void setUpClass() {
+        // Initialize the reserved roles store so that static fields are populated.
+        // In production code, this is guaranteed by how components are initialized by the Security plugin
+        new ReservedRolesStore();
+    }
 
     public void testValidationErrorWithUnknownClusterPrivilegeName() {
         final PutRoleRequest request = new PutRoleRequest();
@@ -164,7 +174,7 @@ public class PutRoleRequestTests extends ESTestCase {
             logger.info("Serializing with version {}", version);
             out.setTransportVersion(version);
         }
-        final boolean mayIncludeRemoteIndices = out.getTransportVersion().onOrAfter(RoleDescriptor.TRANSPORT_VERSION_REMOTE_INDICES);
+        final boolean mayIncludeRemoteIndices = out.getTransportVersion().onOrAfter(TransportVersions.V_8_8_0);
         final PutRoleRequest original = buildRandomRequest(mayIncludeRemoteIndices);
         original.writeTo(out);
 
@@ -180,13 +190,13 @@ public class PutRoleRequestTests extends ESTestCase {
 
     public void testSerializationWithRemoteIndicesThrowsOnUnsupportedVersions() throws IOException {
         final BytesStreamOutput out = new BytesStreamOutput();
-        final TransportVersion versionBeforeRemoteIndices = TransportVersionUtils.getPreviousVersion(
-            RoleDescriptor.TRANSPORT_VERSION_REMOTE_INDICES
+        final TransportVersion versionBeforeAdvancedRemoteClusterSecurity = TransportVersionUtils.getPreviousVersion(
+            TransportVersions.V_8_8_0
         );
         final TransportVersion version = TransportVersionUtils.randomVersionBetween(
             random(),
-            TransportVersion.V_7_17_0,
-            versionBeforeRemoteIndices
+            TransportVersions.V_7_17_0,
+            versionBeforeAdvancedRemoteClusterSecurity
         );
         out.setTransportVersion(version);
 
@@ -196,7 +206,9 @@ public class PutRoleRequestTests extends ESTestCase {
             assertThat(
                 ex.getMessage(),
                 containsString(
-                    "versions of Elasticsearch before [8060099] can't handle remote indices privileges and attempted to send to ["
+                    "versions of Elasticsearch before ["
+                        + TransportVersions.V_8_8_0
+                        + "] can't handle remote indices privileges and attempted to send to ["
                         + version
                         + "]"
                 )
@@ -232,10 +244,6 @@ public class PutRoleRequestTests extends ESTestCase {
             .build();
         request.addApplicationPrivileges(privilege);
         return request;
-    }
-
-    private PutRoleRequest buildRandomRequest() {
-        return buildRandomRequest(true);
     }
 
     private PutRoleRequest buildRandomRequest(boolean allowRemoteIndices) {

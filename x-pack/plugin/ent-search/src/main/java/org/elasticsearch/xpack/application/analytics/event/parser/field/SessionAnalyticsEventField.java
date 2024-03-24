@@ -8,13 +8,14 @@
 
 package org.elasticsearch.xpack.application.analytics.event.parser.field;
 
-import org.elasticsearch.common.collect.MapBuilder;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.xcontent.ObjectParser;
 import org.elasticsearch.xcontent.ParseField;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xpack.application.analytics.event.AnalyticsEvent;
 
 import java.io.IOException;
+import java.util.HashMap;
 import java.util.Map;
 
 import static org.elasticsearch.common.Strings.requireNonBlank;
@@ -24,9 +25,25 @@ public class SessionAnalyticsEventField {
 
     public static ParseField SESSION_ID_FIELD = new ParseField("id");
 
-    private static final ObjectParser<MapBuilder<String, String>, AnalyticsEvent.Context> PARSER = new ObjectParser<>(
+    public static final ParseField CLIENT_ADDRESS_FIELD = new ParseField("ip");
+
+    public static final ParseField USER_AGENT_FIELD = new ParseField("user_agent");
+
+    private static final ObjectParser<Map<String, String>, AnalyticsEvent.Context> PARSER = ObjectParser.fromBuilder(
         SESSION_FIELD.getPreferredName(),
-        MapBuilder::newMapBuilder
+        (c) -> {
+            Map<String, String> mapBuilder = new HashMap<>();
+
+            if (Strings.isNullOrBlank(c.clientAddress()) == false) {
+                mapBuilder.put(CLIENT_ADDRESS_FIELD.getPreferredName(), c.clientAddress());
+            }
+
+            if (Strings.isNullOrBlank(c.userAgent()) == false) {
+                mapBuilder.put(USER_AGENT_FIELD.getPreferredName(), c.userAgent());
+            }
+
+            return mapBuilder;
+        }
     );
 
     static {
@@ -41,6 +58,6 @@ public class SessionAnalyticsEventField {
     private SessionAnalyticsEventField() {}
 
     public static Map<String, String> fromXContent(XContentParser parser, AnalyticsEvent.Context context) throws IOException {
-        return PARSER.parse(parser, context).immutableMap();
+        return Map.copyOf(PARSER.parse(parser, context));
     }
 }

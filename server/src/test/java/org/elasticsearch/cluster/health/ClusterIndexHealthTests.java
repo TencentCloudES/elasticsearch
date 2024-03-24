@@ -7,12 +7,12 @@
  */
 package org.elasticsearch.cluster.health;
 
-import org.elasticsearch.Version;
 import org.elasticsearch.action.ClusterStatsLevel;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.routing.IndexRoutingTable;
 import org.elasticsearch.cluster.routing.RoutingTableGenerator;
 import org.elasticsearch.common.io.stream.Writeable;
+import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.test.AbstractXContentSerializingTestCase;
 import org.elasticsearch.xcontent.ToXContent;
 import org.elasticsearch.xcontent.XContentParser;
@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
+import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpectedToken;
 import static org.hamcrest.CoreMatchers.equalTo;
 
 public class ClusterIndexHealthTests extends AbstractXContentSerializingTestCase<ClusterIndexHealth> {
@@ -36,7 +37,7 @@ public class ClusterIndexHealthTests extends AbstractXContentSerializingTestCase
         int numberOfShards = randomInt(3) + 1;
         int numberOfReplicas = randomInt(4);
         IndexMetadata indexMetadata = IndexMetadata.builder("test1")
-            .settings(settings(Version.CURRENT))
+            .settings(settings(IndexVersion.current()))
             .numberOfShards(numberOfShards)
             .numberOfReplicas(numberOfReplicas)
             .build();
@@ -101,7 +102,13 @@ public class ClusterIndexHealthTests extends AbstractXContentSerializingTestCase
 
     @Override
     protected ClusterIndexHealth doParseInstance(XContentParser parser) throws IOException {
-        return ClusterIndexHealth.fromXContent(parser);
+        ensureExpectedToken(XContentParser.Token.START_OBJECT, parser.nextToken(), parser);
+        XContentParser.Token token = parser.nextToken();
+        ensureExpectedToken(XContentParser.Token.FIELD_NAME, token, parser);
+        String index = parser.currentName();
+        ClusterIndexHealth parsed = ClusterIndexHealth.innerFromXContent(parser, index);
+        ensureExpectedToken(XContentParser.Token.END_OBJECT, parser.nextToken(), parser);
+        return parsed;
     }
 
     @Override

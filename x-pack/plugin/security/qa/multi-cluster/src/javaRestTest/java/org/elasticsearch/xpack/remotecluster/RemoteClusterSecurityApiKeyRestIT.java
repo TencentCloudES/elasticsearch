@@ -15,6 +15,7 @@ import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.Strings;
 import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.search.SearchResponseUtils;
 import org.elasticsearch.test.cluster.ElasticsearchCluster;
 import org.elasticsearch.test.rest.ObjectPath;
 import org.junit.ClassRule;
@@ -59,15 +60,11 @@ public class RemoteClusterSecurityApiKeyRestIT extends AbstractRemoteClusterSecu
                 if (API_KEY_MAP_REF.get() == null) {
                     final Map<String, Object> apiKeyMap = createCrossClusterAccessApiKey("""
                         {
-                          "role": {
-                            "cluster": ["cross_cluster_access"],
-                            "index": [
+                            "search": [
                               {
-                                "names": ["index*", "not_found_index"],
-                                "privileges": ["read", "read_cross_cluster"]
+                                "names": ["index*", "not_found_index"]
                               }
                             ]
-                          }
                         }""");
                     API_KEY_MAP_REF.set(apiKeyMap);
                 }
@@ -187,14 +184,21 @@ public class RemoteClusterSecurityApiKeyRestIT extends AbstractRemoteClusterSecu
             );
             final Response response = performRequestWithApiKey(searchRequest, apiKeyEncoded);
             assertOK(response);
-            final SearchResponse searchResponse = SearchResponse.fromXContent(responseAsParser(response));
-            final List<String> actualIndices = Arrays.stream(searchResponse.getHits().getHits())
-                .map(SearchHit::getIndex)
-                .collect(Collectors.toList());
-            if (alsoSearchLocally) {
-                assertThat(actualIndices, containsInAnyOrder("index1", "local_index"));
-            } else {
-                assertThat(actualIndices, containsInAnyOrder("index1"));
+            final SearchResponse searchResponse;
+            try (var parser = responseAsParser(response)) {
+                searchResponse = SearchResponseUtils.parseSearchResponse(parser);
+            }
+            try {
+                final List<String> actualIndices = Arrays.stream(searchResponse.getHits().getHits())
+                    .map(SearchHit::getIndex)
+                    .collect(Collectors.toList());
+                if (alsoSearchLocally) {
+                    assertThat(actualIndices, containsInAnyOrder("index1", "local_index"));
+                } else {
+                    assertThat(actualIndices, containsInAnyOrder("index1"));
+                }
+            } finally {
+                searchResponse.decRef();
             }
 
             // Check that access is denied because of API key privileges
@@ -318,18 +322,21 @@ public class RemoteClusterSecurityApiKeyRestIT extends AbstractRemoteClusterSecu
 
             // Check that authentication fails if we use a non-existent cross cluster access API key
             updateClusterSettings(
-                Settings.builder()
-                    .put("cluster.remote.invalid_remote.mode", "proxy")
-                    .put("cluster.remote.invalid_remote.proxy_address", fulfillingCluster.getRemoteClusterServerEndpoint(0))
-                    .build()
+                randomBoolean()
+                    ? Settings.builder()
+                        .put("cluster.remote.invalid_remote.seeds", fulfillingCluster.getRemoteClusterServerEndpoint(0))
+                        .build()
+                    : Settings.builder()
+                        .put("cluster.remote.invalid_remote.mode", "proxy")
+                        .put("cluster.remote.invalid_remote.proxy_address", fulfillingCluster.getRemoteClusterServerEndpoint(0))
+                        .build()
             );
             final ResponseException exception4 = expectThrows(
                 ResponseException.class,
                 () -> performRequestWithApiKey(new Request("GET", "/invalid_remote:index1/_search"), apiKeyEncoded)
             );
-            // TODO: improve the error code and message
-            assertThat(exception4.getResponse().getStatusLine().getStatusCode(), equalTo(500));
-            assertThat(exception4.getMessage(), containsString("Unable to open any proxy connections to cluster [invalid_remote]"));
+            assertThat(exception4.getResponse().getStatusLine().getStatusCode(), equalTo(401));
+            assertThat(exception4.getMessage(), containsString("unable to find apikey"));
         }
     }
 

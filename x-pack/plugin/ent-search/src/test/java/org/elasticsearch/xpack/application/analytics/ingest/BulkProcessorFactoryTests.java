@@ -7,31 +7,23 @@
 
 package org.elasticsearch.xpack.application.analytics.ingest;
 
-import org.elasticsearch.ElasticsearchStatusException;
-import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.bulk.BulkProcessor2;
-import org.elasticsearch.action.bulk.BulkRequest;
-import org.elasticsearch.action.index.IndexRequest;
 import org.elasticsearch.client.internal.Client;
+import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.core.TimeValue;
-import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.threadpool.TestThreadPool;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
-import org.mockito.InOrder;
-import org.mockito.Mockito;
 
 import java.util.concurrent.TimeUnit;
 
-import static org.hamcrest.Matchers.equalTo;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.argThat;
-import static org.mockito.Mockito.doAnswer;
+import static org.hamcrest.Matchers.instanceOf;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 
 public class BulkProcessorFactoryTests extends ESTestCase {
@@ -47,80 +39,31 @@ public class BulkProcessorFactoryTests extends ESTestCase {
         ThreadPool.terminate(testThreadPool, 30, TimeUnit.SECONDS);
     }
 
-    public void testFlushDelay() throws Exception {
-        BulkProcessorConfig config = mock(BulkProcessorConfig.class);
-        doReturn(TimeValue.timeValueSeconds(1)).when(config).flushDelay();
-        doReturn(10).when(config).maxNumberOfEventsPerBulk();
-
-        Client client = mock(Client.class);
-
-        doReturn(testThreadPool).when(client).threadPool();
-        BulkProcessor2 bulkProcessor = new BulkProcessorFactory(config).create(client);
-        IndexRequest indexRequest = mock(IndexRequest.class);
-        bulkProcessor.add(indexRequest);
-
-        assertBusy(() -> verify(client).bulk(argThat((BulkRequest bulkRequest) -> {
-            assertThat(bulkRequest.numberOfActions(), equalTo(1));
-            assertThat(bulkRequest.requests().stream().findFirst().get(), equalTo(indexRequest));
-            return true;
-        }), any()), 1, TimeUnit.SECONDS);
+    public void testDefaultConstructor() throws Exception {
+        BulkProcessorFactory factory = new BulkProcessorFactory(mock(Client.class), mock(AnalyticsEventIngestConfig.class));
+        assertThat(factory.create(), instanceOf(BulkProcessor2.class));
     }
 
-    public void testMaxBulkActions() throws InterruptedException {
+    public void testConfigValueAreUsed() throws Exception {
+        TimeValue flushDelay = TimeValue.parseTimeValue(randomTimeValue(), "random time value");
         int maxBulkActions = randomIntBetween(1, 10);
-        int totalEvents = randomIntBetween(1, 5) * maxBulkActions + randomIntBetween(1, maxBulkActions);
-
-        BulkProcessorConfig config = mock(BulkProcessorConfig.class);
-        doReturn(maxBulkActions).when(config).maxNumberOfEventsPerBulk();
-
-        Client client = mock(Client.class);
-        InOrder inOrder = Mockito.inOrder(client);
-
-        doReturn(testThreadPool).when(client).threadPool();
-        BulkProcessor2 bulkProcessor = new BulkProcessorFactory(config).create(client);
-
-        for (int i = 0; i < totalEvents; i++) {
-            bulkProcessor.add(mock(IndexRequest.class));
-        }
-
-        inOrder.verify(client, times(totalEvents / maxBulkActions)).bulk(argThat((BulkRequest bulkRequest) -> {
-            // Verify a bulk is executed immediately with maxNumberOfEventsPerBulk is reached.
-            assertThat(bulkRequest.numberOfActions(), equalTo(maxBulkActions));
-            return true;
-        }), any());
-
-        bulkProcessor.awaitClose(1, TimeUnit.SECONDS);
-
-        if (totalEvents % maxBulkActions > 0) {
-            inOrder.verify(client).bulk(argThat((BulkRequest bulkRequest) -> {
-                // Verify another bulk with only 1 event (the remaining) is executed when closing the processor.
-                assertThat(bulkRequest.numberOfActions(), equalTo(totalEvents % maxBulkActions));
-                return true;
-            }), any());
-        }
-    }
-
-    public void testMaxRetries() {
         int numberOfRetries = between(0, 5);
-        BulkProcessorConfig config = mock(BulkProcessorConfig.class);
-        doReturn(1).when(config).maxNumberOfEventsPerBulk();
+        ByteSizeValue maxBytesInFlight = randomByteSizeValue();
+
+        AnalyticsEventIngestConfig config = mock(AnalyticsEventIngestConfig.class);
+        doReturn(flushDelay).when(config).flushDelay();
+        doReturn(maxBulkActions).when(config).maxNumberOfEventsPerBulk();
+        doReturn(maxBytesInFlight).when(config).maxBytesInFlight();
         doReturn(numberOfRetries).when(config).maxNumberOfRetries();
 
-        Client client = mock(Client.class);
-        doAnswer(i -> {
-            i.getArgument(1, ActionListener.class).onFailure(new ElasticsearchStatusException("", RestStatus.TOO_MANY_REQUESTS));
-            return null;
-        }).when(client).bulk(any(), any());
-        doReturn(testThreadPool).when(client).threadPool();
-        BulkProcessor2 bulkProcessor = new BulkProcessorFactory(config).create(client);
+        BulkProcessor2.Builder baseBuilder = spy(BulkProcessor2.builder(mock(), new BulkProcessorFactory.BulkProcessorListener(), mock()));
+        BulkProcessorFactory factory = new BulkProcessorFactory(config, () -> baseBuilder);
 
-        IndexRequest indexRequest = mock(IndexRequest.class);
-        bulkProcessor.add(indexRequest);
+        assertThat(factory.create(), instanceOf(BulkProcessor2.class));
 
-        verify(client, times(numberOfRetries + 1)).bulk(argThat((BulkRequest bulkRequest) -> {
-            assertThat(bulkRequest.numberOfActions(), equalTo(1));
-            assertThat(bulkRequest.requests().stream().findFirst().get(), equalTo(indexRequest));
-            return true;
-        }), any());
+        verify(baseBuilder).setFlushInterval(eq(flushDelay));
+        verify(baseBuilder).setBulkActions(eq(maxBulkActions));
+        verify(baseBuilder).setMaxNumberOfRetries(numberOfRetries);
+        verify(baseBuilder).setMaxBytesInFlight(maxBytesInFlight);
     }
 }

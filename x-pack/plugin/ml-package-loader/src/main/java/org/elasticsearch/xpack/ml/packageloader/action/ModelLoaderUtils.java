@@ -7,16 +7,17 @@
 
 package org.elasticsearch.xpack.ml.packageloader.action;
 
+import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.ElasticsearchStatusException;
 import org.elasticsearch.ResourceNotFoundException;
 import org.elasticsearch.SpecialPermission;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.hash.MessageDigests;
 import org.elasticsearch.common.io.Streams;
 import org.elasticsearch.common.unit.ByteSizeUnit;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.core.SuppressForbidden;
-import org.elasticsearch.core.Tuple;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.xcontent.XContentParser;
 import org.elasticsearch.xcontent.XContentParserConfiguration;
@@ -28,11 +29,11 @@ import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.security.AccessController;
 import java.security.MessageDigest;
 import java.security.PrivilegedAction;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -53,15 +54,20 @@ final class ModelLoaderUtils {
     public static String METADATA_FILE_EXTENSION = ".metadata.json";
     public static String MODEL_FILE_EXTENSION = ".pt";
 
-    private static ByteSizeValue VOCABULARY_SIZE_LIMIT = new ByteSizeValue(10, ByteSizeUnit.MB);
+    private static ByteSizeValue VOCABULARY_SIZE_LIMIT = new ByteSizeValue(20, ByteSizeUnit.MB);
     private static final String VOCABULARY = "vocabulary";
     private static final String MERGES = "merges";
+    private static final String SCORES = "scores";
+
+    record VocabularyParts(List<String> vocab, List<String> merges, List<Double> scores) {}
 
     static class InputStreamChunker {
 
         private final InputStream inputStream;
         private final MessageDigest digestSha256 = MessageDigests.sha256();
         private final int chunkSize;
+
+        private int totalBytesRead = 0;
 
         InputStreamChunker(InputStream inputStream, int chunkSize) {
             this.inputStream = inputStream;
@@ -81,6 +87,7 @@ final class ModelLoaderUtils {
                 bytesRead += read;
             }
             digestSha256.update(buf, 0, bytesRead);
+            totalBytesRead += bytesRead;
 
             return new BytesArray(buf, 0, bytesRead);
         }
@@ -89,10 +96,15 @@ final class ModelLoaderUtils {
             return MessageDigests.toHexString(digestSha256.digest());
         }
 
+        public int getTotalBytesRead() {
+            return totalBytesRead;
+        }
     }
 
     static InputStream getInputStreamFromModelRepository(URI uri) throws IOException {
         String scheme = uri.getScheme().toLowerCase(Locale.ROOT);
+
+        // if you add a scheme here, also add it to the bootstrap check in {@link MachineLearningPackageLoader#validateModelRepository}
         switch (scheme) {
             case "http":
             case "https":
@@ -104,32 +116,58 @@ final class ModelLoaderUtils {
         }
     }
 
-    public static Tuple<List<String>, List<String>> loadVocabulary(URI uri) {
-        try {
-            InputStream vocabInputStream = getInputStreamFromModelRepository(uri);
-
-            if (uri.getPath().endsWith(".json")) {
-                XContentParser sourceParser = XContentType.JSON.xContent()
-                    .createParser(
-                        XContentParserConfiguration.EMPTY,
-                        Streams.limitStream(vocabInputStream, VOCABULARY_SIZE_LIMIT.getBytes())
-                    );
-                Map<String, List<Object>> vocabAndMerges = sourceParser.map(HashMap::new, XContentParser::list);
-
-                List<String> vocabulary = vocabAndMerges.containsKey(VOCABULARY)
-                    ? vocabAndMerges.get(VOCABULARY).stream().map(Object::toString).collect(Collectors.toList())
-                    : Collections.emptyList();
-                List<String> merges = vocabAndMerges.containsKey(MERGES)
-                    ? vocabAndMerges.get(MERGES).stream().map(Object::toString).collect(Collectors.toList())
-                    : Collections.emptyList();
-
-                return Tuple.tuple(vocabulary, merges);
+    static VocabularyParts loadVocabulary(URI uri) {
+        if (uri.getPath().endsWith(".json")) {
+            try (InputStream vocabInputStream = getInputStreamFromModelRepository(uri)) {
+                return parseVocabParts(vocabInputStream);
+            } catch (Exception e) {
+                throw new ElasticsearchException("Failed to load vocabulary file", e);
             }
-
-            throw new IllegalArgumentException("unknown format vocabulary file format");
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to load vocabulary file", e);
         }
+
+        throw new IllegalArgumentException("unknown format vocabulary file format");
+    }
+
+    // visible for testing
+    static VocabularyParts parseVocabParts(InputStream vocabInputStream) throws IOException {
+        Map<String, List<Object>> vocabParts;
+        try (
+            XContentParser sourceParser = XContentType.JSON.xContent()
+                .createParser(XContentParserConfiguration.EMPTY, Streams.limitStream(vocabInputStream, VOCABULARY_SIZE_LIMIT.getBytes()))
+        ) {
+            vocabParts = sourceParser.map(HashMap::new, XContentParser::list);
+        }
+
+        List<String> vocabulary = vocabParts.containsKey(VOCABULARY)
+            ? vocabParts.get(VOCABULARY).stream().map(Object::toString).collect(Collectors.toList())
+            : List.of();
+        List<String> merges = vocabParts.containsKey(MERGES)
+            ? vocabParts.get(MERGES).stream().map(Object::toString).collect(Collectors.toList())
+            : List.of();
+        List<Double> scores = vocabParts.containsKey(SCORES)
+            ? vocabParts.get(SCORES).stream().map(o -> (Double) o).collect(Collectors.toList())
+            : List.of();
+
+        return new VocabularyParts(vocabulary, merges, scores);
+    }
+
+    static URI resolvePackageLocation(String repository, String artefact) throws URISyntaxException {
+        URI baseUri = new URI(repository.endsWith("/") ? repository : repository + "/").normalize();
+        URI resolvedUri = baseUri.resolve(artefact).normalize();
+
+        if (Strings.isNullOrEmpty(baseUri.getScheme())) {
+            throw new IllegalArgumentException("Repository must contain a scheme");
+        }
+
+        if (baseUri.getScheme().equals(resolvedUri.getScheme()) == false) {
+            throw new IllegalArgumentException("Illegal schema change in package location");
+        }
+
+        if (resolvedUri.getPath().startsWith(baseUri.getPath()) == false) {
+            throw new IllegalArgumentException("Illegal path in package location");
+        }
+
+        return baseUri.resolve(artefact);
     }
 
     private ModelLoaderUtils() {}
@@ -137,6 +175,8 @@ final class ModelLoaderUtils {
     @SuppressWarnings("'java.lang.SecurityManager' is deprecated and marked for removal ")
     @SuppressForbidden(reason = "we need socket connection to download")
     private static InputStream getHttpOrHttpsInputStream(URI uri) throws IOException {
+
+        assert uri.getUserInfo() == null : "URI's with credentials are not supported";
 
         SecurityManager sm = System.getSecurityManager();
         if (sm != null) {

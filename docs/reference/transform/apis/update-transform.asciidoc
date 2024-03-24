@@ -92,6 +92,26 @@ include::{es-repo-dir}/rest-api/common-parms.asciidoc[tag=dest]
 (Required, string)
 include::{es-repo-dir}/rest-api/common-parms.asciidoc[tag=dest-index]
 
+//Begin aliases
+`aliases`:::
+(Optional, array of objects)
+include::{es-repo-dir}/rest-api/common-parms.asciidoc[tag=dest-aliases]
++
+.Properties of `aliases`
+[%collapsible%open]
+=====
+
+`alias`::::
+(Required, string)
+include::{es-repo-dir}/rest-api/common-parms.asciidoc[tag=dest-aliases-alias]
+
+`move_on_creation`::::
+(Optional, boolean)
+include::{es-repo-dir}/rest-api/common-parms.asciidoc[tag=dest-aliases-move-on-creation]
+
+=====
+//End aliases
+
 `pipeline`:::
 (Optional, string)
 include::{es-repo-dir}/rest-api/common-parms.asciidoc[tag=dest-pipeline]
@@ -321,4 +341,4 @@ When the {transform} is updated, you receive the updated configuration:
 ----
 // TESTRESPONSE[s/"version" : "8.4.0"/"version" : $body.version/]
 // TESTRESPONSE[s/"create_time" : 1656113450613/"create_time" : $body.create_time/]
-// TESTRESPONSE[s/"authorization" : \{[^}]*\},//]
+// TESTRESPONSE[s/"superuser"/"_es_test_root"/]
