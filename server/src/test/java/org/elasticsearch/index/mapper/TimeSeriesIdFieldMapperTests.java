@@ -67,7 +67,7 @@ public class TimeSeriesIdFieldMapperTests extends MetadataMapperTestCase {
                 .put(MapperService.INDEX_MAPPING_DIMENSION_FIELDS_LIMIT_SETTING.getKey(), 200) // Allow tests that use many dimensions
                 .put(IndexMetadata.INDEX_ROUTING_PATH.getKey(), routingPath)
                 .put(IndexSettings.TIME_SERIES_START_TIME.getKey(), "2021-04-28T00:00:00Z")
-                .put(IndexSettings.TIME_SERIES_END_TIME.getKey(), "2021-04-29T00:00:00Z")
+                .put(IndexSettings.TIME_SERIES_END_TIME.getKey(), "2021-10-29T00:00:00Z")
                 .build(),
             mappings
         ).documentMapper();
@@ -719,39 +719,5 @@ public class TimeSeriesIdFieldMapperTests extends MetadataMapperTestCase {
             );
         });
         assertThat(failure.getMessage(), equalTo("[5:1] failed to parse: Illegal base64 character 20"));
-    }
-
-    public void testParseWithDynamicMappingNullId() {
-        Settings indexSettings = Settings.builder()
-            .put(IndexSettings.MODE.getKey(), "time_series")
-            .put(IndexMetadata.INDEX_ROUTING_PATH.getKey(), "dim")
-            .build();
-        MapperService mapper = createMapperService(IndexVersion.current(), indexSettings, () -> false);
-        SourceToParse source = new SourceToParse(null, new BytesArray("""
-            {
-                "@timestamp": 1609459200000,
-                "dim": "6a841a21",
-                "value": 100
-            }"""), XContentType.JSON);
-        var failure = expectThrows(DocumentParsingException.class, () -> {
-            IndexShard.prepareIndex(
-                mapper,
-                source,
-                UNASSIGNED_SEQ_NO,
-                randomNonNegativeLong(),
-                Versions.MATCH_ANY,
-                VersionType.INTERNAL,
-                Engine.Operation.Origin.PRIMARY,
-                -1,
-                false,
-                UNASSIGNED_SEQ_NO,
-                0,
-                System.nanoTime()
-            );
-        });
-        assertThat(
-            failure.getMessage(),
-            equalTo("[5:1] failed to parse: _ts_routing_hash was null but must be set because index [index] is in time_series mode")
-        );
     }
 }

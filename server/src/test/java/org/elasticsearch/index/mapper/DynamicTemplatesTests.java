@@ -21,7 +21,7 @@ import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.index.IndexVersions;
-import org.elasticsearch.plugins.internal.DocumentSizeObserver;
+import org.elasticsearch.plugins.internal.XContentMeteringParserDecorator;
 import org.elasticsearch.test.XContentTestUtils;
 import org.elasticsearch.test.index.IndexVersionUtils;
 import org.elasticsearch.xcontent.XContentBuilder;
@@ -244,11 +244,10 @@ public class DynamicTemplatesTests extends MapperServiceTestCase {
                 }
                 b.endArray();
             }));
-            assertWarnings("""
-                dynamic template [test] has invalid content [{"match_mapping_type":"string","mapping":{"badparam":false}}], \
-                attempted to validate it with the following match_mapping_type: [string], last error: \
-                [unknown parameter [badparam] on mapper [__dynamic__test] of type [null]]""");
-
+            assertWarnings(
+                "Parameter [badparam] is used in a dynamic template mapping and has no effect on type [null]. "
+                    + "Usage will result in an error in future major versions and should be removed."
+            );
             mapper.parse(source(b -> b.field("field", "foo")));
             assertWarnings(
                 "Parameter [badparam] is used in a dynamic template mapping and has no effect on type [null]. "
@@ -740,7 +739,7 @@ public class DynamicTemplatesTests extends MapperServiceTestCase {
                     XContentType.JSON,
                     null,
                     Map.of("foo", "geo_point"),
-                    DocumentSizeObserver.EMPTY_INSTANCE
+                    XContentMeteringParserDecorator.NOOP
                 )
             );
         assertThat(doc.rootDoc().getFields("foo"), hasSize(2));

@@ -18,6 +18,9 @@ import org.elasticsearch.action.datastreams.GetDataStreamAction;
 import org.elasticsearch.action.datastreams.MigrateToDataStreamAction;
 import org.elasticsearch.action.datastreams.ModifyDataStreamsAction;
 import org.elasticsearch.action.datastreams.PromoteDataStreamAction;
+import org.elasticsearch.action.datastreams.lifecycle.ExplainDataStreamLifecycleAction;
+import org.elasticsearch.action.datastreams.lifecycle.GetDataStreamLifecycleAction;
+import org.elasticsearch.action.datastreams.lifecycle.PutDataStreamLifecycleAction;
 import org.elasticsearch.client.internal.OriginSettingClient;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
 import org.elasticsearch.cluster.node.DiscoveryNodes;
@@ -39,10 +42,7 @@ import org.elasticsearch.datastreams.action.PromoteDataStreamTransportAction;
 import org.elasticsearch.datastreams.lifecycle.DataStreamLifecycleErrorStore;
 import org.elasticsearch.datastreams.lifecycle.DataStreamLifecycleService;
 import org.elasticsearch.datastreams.lifecycle.action.DeleteDataStreamLifecycleAction;
-import org.elasticsearch.datastreams.lifecycle.action.ExplainDataStreamLifecycleAction;
-import org.elasticsearch.datastreams.lifecycle.action.GetDataStreamLifecycleAction;
 import org.elasticsearch.datastreams.lifecycle.action.GetDataStreamLifecycleStatsAction;
-import org.elasticsearch.datastreams.lifecycle.action.PutDataStreamLifecycleAction;
 import org.elasticsearch.datastreams.lifecycle.action.TransportDeleteDataStreamLifecycleAction;
 import org.elasticsearch.datastreams.lifecycle.action.TransportExplainDataStreamLifecycleAction;
 import org.elasticsearch.datastreams.lifecycle.action.TransportGetDataStreamLifecycleAction;
@@ -200,7 +200,8 @@ public class DataStreamsPlugin extends Plugin implements ActionPlugin, HealthPlu
                 services.threadPool()::absoluteTimeInMillis,
                 errorStoreInitialisationService.get(),
                 services.allocationService(),
-                dataStreamLifecycleErrorsPublisher.get()
+                dataStreamLifecycleErrorsPublisher.get(),
+                services.dataStreamGlobalRetentionProvider()
             )
         );
         dataLifecycleInitialisationService.get().init();

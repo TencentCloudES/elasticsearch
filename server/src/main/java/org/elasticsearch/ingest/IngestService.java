@@ -61,7 +61,8 @@ import org.elasticsearch.index.analysis.AnalysisRegistry;
 import org.elasticsearch.node.ReportingService;
 import org.elasticsearch.plugins.IngestPlugin;
 import org.elasticsearch.plugins.internal.DocumentParsingProvider;
-import org.elasticsearch.plugins.internal.DocumentSizeObserver;
+import org.elasticsearch.plugins.internal.XContentMeteringParserDecorator;
+import org.elasticsearch.plugins.internal.XContentParserDecorator;
 import org.elasticsearch.script.ScriptService;
 import org.elasticsearch.threadpool.Scheduler;
 import org.elasticsearch.threadpool.ThreadPool;
@@ -83,6 +84,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
@@ -127,7 +129,12 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
         final BiFunction<Long, Runnable, Scheduler.ScheduledCancellable> scheduler = createScheduler(threadPool);
         long intervalMillis = IngestSettings.GROK_WATCHDOG_INTERVAL.get(settings).getMillis();
         long maxExecutionTimeMillis = IngestSettings.GROK_WATCHDOG_INTERVAL.get(settings).getMillis();
-        return MatcherWatchdog.newInstance(intervalMillis, maxExecutionTimeMillis, threadPool::relativeTimeInMillis, scheduler::apply);
+        return MatcherWatchdog.newInstance(
+            intervalMillis,
+            maxExecutionTimeMillis,
+            threadPool.relativeTimeInMillisSupplier(),
+            scheduler::apply
+        );
     }
 
     /**
@@ -195,7 +202,7 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
                 scriptService,
                 analysisRegistry,
                 threadPool.getThreadContext(),
-                threadPool::relativeTimeInMillis,
+                threadPool.relativeTimeInMillisSupplier(),
                 createScheduler(threadPool),
                 this,
                 client,
@@ -696,7 +703,7 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
      * @param onCompletion A callback executed once all documents have been processed. Accepts the thread
      *                     that ingestion completed on or an exception in the event that the entire operation
      *                     has failed.
-     * @param executorName Which executor the bulk request should be executed on.
+     * @param executor Which executor the bulk request should be executed on.
      */
     public void executeBulkRequest(
         final int numberOfActionRequests,
@@ -706,11 +713,11 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
         final TriConsumer<Integer, String, Exception> onStoreFailure,
         final BiConsumer<Integer, Exception> onFailure,
         final BiConsumer<Thread, Exception> onCompletion,
-        final String executorName
+        final Executor executor
     ) {
         assert numberOfActionRequests > 0 : "numberOfActionRequests must be greater than 0 but was [" + numberOfActionRequests + "]";
 
-        threadPool.executor(executorName).execute(new AbstractRunnable() {
+        executor.execute(new AbstractRunnable() {
 
             @Override
             public void onFailure(Exception e) {
@@ -730,6 +737,7 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
                         }
 
                         PipelineIterator pipelines = getAndResetPipelines(indexRequest);
+                        Pipeline firstPipeline = pipelines.peekFirst();
                         if (pipelines.hasNext() == false) {
                             i++;
                             continue;
@@ -738,10 +746,15 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
                         // start the stopwatch and acquire a ref to indicate that we're working on this document
                         final long startTimeInNanos = System.nanoTime();
                         totalMetrics.preIngest();
+                        if (firstPipeline != null) {
+                            firstPipeline.getMetrics().preIngestBytes(indexRequest.ramBytesUsed());
+                        }
                         final int slot = i;
                         final Releasable ref = refs.acquire();
-                        final DocumentSizeObserver documentSizeObserver = documentParsingProvider.newDocumentSizeObserver();
-                        final IngestDocument ingestDocument = newIngestDocument(indexRequest, documentSizeObserver);
+                        final XContentMeteringParserDecorator meteringParserDecorator = documentParsingProvider.newMeteringParserDecorator(
+                            indexRequest
+                        );
+                        final IngestDocument ingestDocument = newIngestDocument(indexRequest, meteringParserDecorator);
                         final org.elasticsearch.script.Metadata originalDocumentMetadata = ingestDocument.getMetadata().clone();
                         // the document listener gives us three-way logic: a document can fail processing (1), or it can
                         // be successfully processed. a successfully processed document can be kept (2) or dropped (3).
@@ -753,6 +766,9 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
                                     if (result.success) {
                                         if (result.shouldKeep == false) {
                                             onDropped.accept(slot);
+                                        } else {
+                                            assert firstPipeline != null;
+                                            firstPipeline.getMetrics().postIngestBytes(indexRequest.ramBytesUsed());
                                         }
                                     } else {
                                         // We were given a failure result in the onResponse method, so we must store the failure
@@ -779,7 +795,7 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
                         );
 
                         executePipelines(pipelines, indexRequest, ingestDocument, shouldStoreFailure, documentListener);
-                        indexRequest.setNormalisedBytesParsed(documentSizeObserver.normalisedBytesParsed());
+                        indexRequest.setNormalisedBytesParsed(meteringParserDecorator.meteredDocumentSize().ingestedBytes());
                         assert actionRequest.index() != null;
 
                         i++;
@@ -859,6 +875,10 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
         public PipelineSlot next() {
             return pipelineSlotIterator.next();
         }
+
+        public Pipeline peekFirst() {
+            return getPipeline(defaultPipeline != null ? defaultPipeline : finalPipeline);
+        }
     }
 
     private void executePipelines(
@@ -924,14 +944,17 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
                     // An IllegalArgumentException can be thrown when an ingest processor creates a source map that is self-referencing.
                     // In that case, we catch and wrap the exception, so we can include more details
                     exceptionHandler.accept(
-                        new IllegalArgumentException(
-                            format(
-                                "Failed to generate the source document for ingest pipeline [%s] for document [%s/%s]",
-                                pipelineId,
-                                indexRequest.index(),
-                                indexRequest.id()
-                            ),
-                            ex
+                        new IngestPipelineException(
+                            pipelineId,
+                            new IllegalArgumentException(
+                                format(
+                                    "Failed to generate the source document for ingest pipeline [%s] for document [%s/%s]",
+                                    pipelineId,
+                                    indexRequest.index(),
+                                    indexRequest.id()
+                                ),
+                                ex
+                            )
                         )
                     );
                     return; // document failed!
@@ -943,14 +966,18 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
                 if (Objects.equals(originalIndex, newIndex) == false) {
                     // final pipelines cannot change the target index (either directly or by way of a reroute)
                     if (isFinalPipeline) {
+                        logger.info("Service stack: [{}]", ingestDocument.getPipelineStack());
                         exceptionHandler.accept(
-                            new IllegalStateException(
-                                format(
-                                    "final pipeline [%s] can't change the target index (from [%s] to [%s]) for document [%s]",
-                                    pipelineId,
-                                    originalIndex,
-                                    newIndex,
-                                    indexRequest.id()
+                            new IngestPipelineException(
+                                pipelineId,
+                                new IllegalStateException(
+                                    format(
+                                        "final pipeline [%s] can't change the target index (from [%s] to [%s]) for document [%s]",
+                                        pipelineId,
+                                        originalIndex,
+                                        newIndex,
+                                        indexRequest.id()
+                                    )
                                 )
                             )
                         );
@@ -963,12 +990,15 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
                         List<String> indexCycle = new ArrayList<>(ingestDocument.getIndexHistory());
                         indexCycle.add(newIndex);
                         exceptionHandler.accept(
-                            new IllegalStateException(
-                                format(
-                                    "index cycle detected while processing pipeline [%s] for document [%s]: %s",
-                                    pipelineId,
-                                    indexRequest.id(),
-                                    indexCycle
+                            new IngestPipelineException(
+                                pipelineId,
+                                new IllegalStateException(
+                                    format(
+                                        "index cycle detected while processing pipeline [%s] for document [%s]: %s",
+                                        pipelineId,
+                                        indexRequest.id(),
+                                        indexCycle
+                                    )
                                 )
                             )
                         );
@@ -1077,14 +1107,14 @@ public class IngestService implements ClusterStateApplier, ReportingService<Inge
     /**
      * Builds a new ingest document from the passed-in index request.
      */
-    private static IngestDocument newIngestDocument(final IndexRequest request, DocumentSizeObserver documentSizeObserver) {
+    private static IngestDocument newIngestDocument(final IndexRequest request, XContentParserDecorator parserDecorator) {
         return new IngestDocument(
             request.index(),
             request.id(),
             request.version(),
             request.routing(),
             request.versionType(),
-            request.sourceAsMap(documentSizeObserver)
+            request.sourceAsMap(parserDecorator)
         );
     }
 

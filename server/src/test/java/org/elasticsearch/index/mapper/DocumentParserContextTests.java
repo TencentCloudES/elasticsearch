@@ -11,6 +11,12 @@ package org.elasticsearch.index.mapper;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.IndexVersion;
 import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentParser;
+import org.elasticsearch.xcontent.XContentType;
+import org.elasticsearch.xcontent.json.JsonXContent;
+
+import java.io.IOException;
 
 import static org.hamcrest.Matchers.contains;
 
@@ -20,9 +26,9 @@ public class DocumentParserContextTests extends ESTestCase {
     private final MapperBuilderContext root = MapperBuilderContext.root(false, false);
 
     public void testDynamicMapperSizeMultipleMappers() {
-        context.addDynamicMapper(new TextFieldMapper.Builder("foo", createDefaultIndexAnalyzers()).build(root));
+        context.addDynamicMapper(new TextFieldMapper.Builder("foo", createDefaultIndexAnalyzers(), false).build(root));
         assertEquals(1, context.getNewFieldsSize());
-        context.addDynamicMapper(new TextFieldMapper.Builder("bar", createDefaultIndexAnalyzers()).build(root));
+        context.addDynamicMapper(new TextFieldMapper.Builder("bar", createDefaultIndexAnalyzers(), false).build(root));
         assertEquals(2, context.getNewFieldsSize());
         context.addDynamicRuntimeField(new TestRuntimeField("runtime1", "keyword"));
         assertEquals(3, context.getNewFieldsSize());
@@ -37,9 +43,9 @@ public class DocumentParserContextTests extends ESTestCase {
     }
 
     public void testDynamicMapperSizeSameFieldMultipleMappers() {
-        context.addDynamicMapper(new TextFieldMapper.Builder("foo", createDefaultIndexAnalyzers()).build(root));
+        context.addDynamicMapper(new TextFieldMapper.Builder("foo", createDefaultIndexAnalyzers(), false).build(root));
         assertEquals(1, context.getNewFieldsSize());
-        context.addDynamicMapper(new TextFieldMapper.Builder("foo", createDefaultIndexAnalyzers()).build(root));
+        context.addDynamicMapper(new TextFieldMapper.Builder("foo", createDefaultIndexAnalyzers(), false).build(root));
         assertEquals(1, context.getNewFieldsSize());
     }
 
@@ -67,4 +73,64 @@ public class DocumentParserContextTests extends ESTestCase {
         assertThat(context.getIgnoredFields(), contains("keyword_field"));
     }
 
+    public void testSwitchParser() throws IOException {
+        var settings = Settings.builder().put("index.mapping.total_fields.limit", 1).build();
+        context = new TestDocumentParserContext(settings);
+        XContentParser parser = createParser(JsonXContent.jsonXContent, "{ \"foo\": \"bar\" }");
+        DocumentParserContext newContext = context.switchParser(parser);
+        assertNotEquals(context.parser(), newContext.parser());
+        assertEquals(context.indexSettings(), newContext.indexSettings());
+        assertEquals(parser, newContext.parser());
+        assertEquals("1", newContext.indexSettings().getSettings().get("index.mapping.total_fields.limit"));
+    }
+
+    public void testCreateDynamicMapperBuilderContextFromEmptyContext() throws IOException {
+        var resultFromEmptyParserContext = context.createDynamicMapperBuilderContext();
+
+        assertEquals("hey", resultFromEmptyParserContext.buildFullName("hey"));
+        assertFalse(resultFromEmptyParserContext.isSourceSynthetic());
+        assertFalse(resultFromEmptyParserContext.isDataStream());
+        assertFalse(resultFromEmptyParserContext.parentObjectContainsDimensions());
+        assertEquals(ObjectMapper.Defaults.DYNAMIC, resultFromEmptyParserContext.getDynamic());
+        assertEquals(MapperService.MergeReason.MAPPING_UPDATE, resultFromEmptyParserContext.getMergeReason());
+        assertFalse(resultFromEmptyParserContext.isInNestedContext());
+    }
+
+    public void testCreateDynamicMapperBuilderContext() throws IOException {
+        var mapping = XContentBuilder.builder(XContentType.JSON.xContent())
+            .startObject()
+            .startObject("_doc")
+            .startObject("_source")
+            .field("mode", "synthetic")
+            .endObject()
+            .startObject(DataStreamTimestampFieldMapper.NAME)
+            .field("enabled", "true")
+            .endObject()
+            .startObject("properties")
+            .startObject(DataStreamTimestampFieldMapper.DEFAULT_PATH)
+            .field("type", "date")
+            .endObject()
+            .startObject("foo")
+            .field("type", "passthrough")
+            .field("time_series_dimension", "true")
+            .field("priority", "100")
+            .endObject()
+            .endObject()
+            .endObject()
+            .endObject();
+        var documentMapper = new MapperServiceTestCase() {
+        }.createDocumentMapper(mapping);
+        var parserContext = new TestDocumentParserContext(documentMapper.mappers(), null);
+        parserContext.path().add("foo");
+
+        var resultFromParserContext = parserContext.createDynamicMapperBuilderContext();
+
+        assertEquals("foo.hey", resultFromParserContext.buildFullName("hey"));
+        assertTrue(resultFromParserContext.isSourceSynthetic());
+        assertTrue(resultFromParserContext.isDataStream());
+        assertTrue(resultFromParserContext.parentObjectContainsDimensions());
+        assertEquals(ObjectMapper.Defaults.DYNAMIC, resultFromParserContext.getDynamic());
+        assertEquals(MapperService.MergeReason.MAPPING_UPDATE, resultFromParserContext.getMergeReason());
+        assertFalse(resultFromParserContext.isInNestedContext());
+    }
 }

@@ -23,6 +23,7 @@ sourceCommand
     : explainCommand
     | fromCommand
     | rowCommand
+    | metricsCommand
     | showCommand
     | metaCommand
     ;
@@ -31,6 +32,7 @@ processingCommand
     : evalCommand
     | inlinestatsCommand
     | limitCommand
+    | lookupCommand
     | keepCommand
     | sortCommand
     | statsCommand
@@ -41,6 +43,7 @@ processingCommand
     | grokCommand
     | enrichCommand
     | mvExpandCommand
+    | matchCommand
     ;
 
 whereCommand
@@ -51,6 +54,7 @@ booleanExpression
     : NOT booleanExpression                                                      #logicalNot
     | valueExpression                                                            #booleanDefault
     | regexBooleanExpression                                                     #regexExpression
+    | matchBooleanExpression                                                     #matchExpression
     | left=booleanExpression operator=AND right=booleanExpression                #logicalBinary
     | left=booleanExpression operator=OR right=booleanExpression                 #logicalBinary
     | valueExpression (NOT)? IN LP valueExpression (COMMA valueExpression)* RP   #logicalIn
@@ -60,6 +64,10 @@ booleanExpression
 regexBooleanExpression
     : valueExpression (NOT)? kind=LIKE pattern=string
     | valueExpression (NOT)? kind=RLIKE pattern=string
+    ;
+
+matchBooleanExpression
+    : qualifiedName MATCH_OPERATOR queryString=string
     ;
 
 valueExpression
@@ -79,10 +87,15 @@ primaryExpression
     | qualifiedName                                                                     #dereference
     | functionExpression                                                                #function
     | LP booleanExpression RP                                                           #parenthesizedExpression
+    | primaryExpression CAST_OP dataType                                                #inlineCast
     ;
 
 functionExpression
     : identifier LP (ASTERISK | (booleanExpression (COMMA booleanExpression)*))? RP
+    ;
+
+dataType
+    : identifier                                                                        #toDataType
     ;
 
 rowCommand
@@ -99,7 +112,21 @@ field
     ;
 
 fromCommand
-    : FROM fromIdentifier (COMMA fromIdentifier)* metadata?
+    : FROM indexPattern (COMMA indexPattern)* metadata?
+    ;
+
+indexPattern
+    : clusterString COLON indexString
+    | indexString
+    ;
+
+clusterString
+    : UNQUOTED_SOURCE
+    ;
+
+indexString
+    : UNQUOTED_SOURCE
+    | QUOTED_STRING
     ;
 
 metadata
@@ -108,11 +135,15 @@ metadata
     ;
 
 metadataOption
-    : METADATA fromIdentifier (COMMA fromIdentifier)*
+    : METADATA UNQUOTED_SOURCE (COMMA UNQUOTED_SOURCE)*
     ;
 
 deprecated_metadata
     : OPENING_BRACKET metadataOption CLOSING_BRACKET
+    ;
+
+metricsCommand
+    : METRICS indexPattern (COMMA indexPattern)* aggregates=fields? (BY grouping=fields)?
     ;
 
 evalCommand
@@ -127,10 +158,6 @@ inlinestatsCommand
     : INLINESTATS stats=fields (BY grouping=fields)?
     ;
 
-fromIdentifier
-    : FROM_UNQUOTED_IDENTIFIER
-    | QUOTED_IDENTIFIER
-    ;
 
 qualifiedName
     : identifier (DOT identifier)*
@@ -138,6 +165,10 @@ qualifiedName
 
 qualifiedNamePattern
     : identifierPattern (DOT identifierPattern)*
+    ;
+
+qualifiedNamePatterns
+    : qualifiedNamePattern (COMMA qualifiedNamePattern)*
     ;
 
 identifier
@@ -155,11 +186,16 @@ constant
     | decimalValue                                                                      #decimalLiteral
     | integerValue                                                                      #integerLiteral
     | booleanValue                                                                      #booleanLiteral
-    | PARAM                                                                             #inputParam
+    | params                                                                            #inputParams
     | string                                                                            #stringLiteral
     | OPENING_BRACKET numericValue (COMMA numericValue)* CLOSING_BRACKET                #numericArrayLiteral
     | OPENING_BRACKET booleanValue (COMMA booleanValue)* CLOSING_BRACKET                #booleanArrayLiteral
     | OPENING_BRACKET string (COMMA string)* CLOSING_BRACKET                            #stringArrayLiteral
+    ;
+
+params
+    : PARAM                        #inputParam
+    | NAMED_OR_POSITIONAL_PARAM    #inputNamedOrPositionalParam
     ;
 
 limitCommand
@@ -175,11 +211,11 @@ orderExpression
     ;
 
 keepCommand
-    :  KEEP qualifiedNamePattern (COMMA qualifiedNamePattern)*
+    :  KEEP qualifiedNamePatterns
     ;
 
 dropCommand
-    : DROP qualifiedNamePattern (COMMA qualifiedNamePattern)*
+    : DROP qualifiedNamePatterns
     ;
 
 renameCommand
@@ -228,7 +264,7 @@ integerValue
     ;
 
 string
-    : STRING
+    : QUOTED_STRING
     ;
 
 comparisonOperator
@@ -257,4 +293,16 @@ enrichCommand
 
 enrichWithClause
     : (newName=qualifiedNamePattern ASSIGN)? enrichField=qualifiedNamePattern
+    ;
+
+lookupCommand
+    : LOOKUP tableName=indexPattern ON matchFields=qualifiedNamePatterns
+    ;
+
+matchCommand
+    : MATCH matchQuery
+    ;
+
+matchQuery
+    : QUOTED_STRING
     ;
